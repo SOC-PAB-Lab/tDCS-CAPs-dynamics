@@ -171,6 +171,7 @@ marimo/_lsp/
 __marimo__/
 
 # R
+*.Rproj
 .Rproj.user
 .Rhistory
 .RData
