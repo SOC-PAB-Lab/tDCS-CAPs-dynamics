@@ -1,0 +1,897 @@
+---
+title: "Statistical analysis CAPs dynamics.Rmd"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-06-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This notebook tests whether tDCS (sham, unilateral, bilateral) affects CAPs dynamics measures (occurrence rate, dwell time, transition probability) across subjects.
+
+1.  **Omnibus test**: within-subject permutation LMER F-test (`param ~ session + (1|subject)`) for each CAP, with condition labels shuffled within each subject.
+2.  **Post-hoc**: paired permutation t-tests for the three pairwise comparisons (unilateral vs sham, bilateral vs sham, bilateral vs unilateral), with Bonferroni correction applied within each parameter across the three comparisons.
+
+```{r}
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(knitr)
+library(emmeans)
+library(knitr)
+library(ggpubr)
+library(rstatix)
+library(sjPlot)
+library(sjtable2df)
+library(report)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(performance)
+#library(flexplot)
+library(DHARMa)
+library(gt)
+```
+
+```{r}
+prepare_df <- function(file_path) {
+  # Read data from the provided file path
+  data <- read.csv(file_path)
+  
+  # Clean up columns: remove original session/run and rename _name columns
+  data <- data %>%
+    select(-session, -run) %>%
+    rename(session = session_name, run = run_name)
+  
+  # Filter to include only "On" data
+  data_on <- data    #%>% filter(run == "tDCS On")
+  
+  # Convert factors with proper reference levels
+  data_on$session <- factor(data_on$session, levels = c("Sham", "Unilateral", "Bilateral"))
+  data_on$subject <- factor(data_on$subject)
+  return(data_on)
+}
+```
+
+# LMER permutation F-tets
+
+## Perm F-test functions
+
+```{r}
+get_perm_f_val_caps <- function(data, param_list, n_perm = 10000,
+                                 print_progress = TRUE, seed = 123) {
+  # Fixed columns / reference
+  subject_col <- "subject"
+  condition_col <- "session"
+  ref_level <- "Sham"
+
+  # Store base seed for parameter-specific seeding
+  base_seed <- seed
+
+  # Ensure factor with reference level
+  data[[condition_col]] <- relevel(as.factor(data[[condition_col]]), ref = ref_level)
+
+  results_df <- data.frame(
+    parameter = character(),
+    f_statistic = numeric(),
+    p_value = numeric(),
+    n_valid_perms = integer(),
+    n_obs = integer(),
+    singular_warnings = integer(),
+    original_singular = logical(),
+    significance = character(),
+    stringsAsFactors = FALSE
+  )
+
+  for (i in seq_along(param_list)) {
+    param <- param_list[i]
+    
+    # Set parameter-specific seed for reproducibility
+    if (!is.null(base_seed)) {
+      set.seed(base_seed + i - 1)
+    }
+    
+    if (print_progress) {
+      cat("##########################\n")
+      cat("Within-Subject Permutation Test for:", param, "\n")
+      if (!is.null(base_seed)) {
+        cat("Seed:", base_seed + i - 1, "\n")
+      }
+    }
+
+    # formula y ~ condition + (1|subject)
+    formula <- as.formula(sprintf("%s ~ %s + (1|%s)", param, condition_col, subject_col))
+    if (print_progress) cat("Formula:", deparse(formula), "\n")
+
+    # Select data for this parameter (NO outlier removal)
+    model_df <- data %>%
+      dplyr::select(dplyr::all_of(c(subject_col, condition_col, param))) %>%
+      dplyr::filter(!is.na(.data[[param]]))  # Only remove missing values
+
+    n_obs <- nrow(model_df)
+    n_subjects <- dplyr::n_distinct(model_df[[subject_col]])
+
+    if (print_progress) {
+      cat("Total observations:", n_obs, "\n")
+      cat("Number of subjects:", n_subjects, "\n")
+    }
+
+    # Check if enough data
+    if (n_obs == 0 || n_subjects < 2) {
+      if (print_progress) cat("Not enough data. Skipping", param, "\n\n")
+      results_df <- rbind(
+        results_df,
+        data.frame(
+          parameter = param,
+          f_statistic = NA_real_,
+          p_value = NA_real_,
+          n_valid_perms = 0L,
+          n_obs = n_obs,
+          singular_warnings = NA_integer_,
+          original_singular = NA,
+          significance = "ns",
+          stringsAsFactors = FALSE
+        )
+      )
+      next
+    }
+
+    # Call permutation (uses current RNG state from set.seed above)
+    perm_result <- permutation_test_lmer(
+      formula = formula,
+      data = model_df,
+      group_var = condition_col,
+      subject_col = subject_col,
+      n_perm = n_perm
+    )
+
+    sig_level <- ifelse(perm_result$p_value < 0.001, "***",
+                 ifelse(perm_result$p_value < 0.01,  "**",
+                 ifelse(perm_result$p_value < 0.05,  "*", "ns")))
+
+    results_df <- rbind(
+      results_df,
+      data.frame(
+        parameter = param,
+        f_statistic = perm_result$original_f,
+        p_value = perm_result$p_value,
+        n_valid_perms = perm_result$n_valid_perms,
+        n_obs = n_obs,
+        singular_warnings = perm_result$singular_warnings,
+        original_singular = perm_result$original_singular,
+        significance = sig_level,
+        stringsAsFactors = FALSE
+      )
+    )
+
+    if (print_progress) {
+      cat("\n")
+      cat("Original model singular:", perm_result$original_singular, "\n")
+      cat("Singular warnings in permutations:", perm_result$singular_warnings, "out of", n_perm, "\n")
+      cat("Original F-statistic:", perm_result$original_f, "\n")
+      cat("Permutation p-value:", perm_result$p_value, "\n")
+      cat("Valid permutations:", perm_result$n_valid_perms, "out of", n_perm, "\n")
+      cat("Significance:", sig_level, "\n\n")
+    }
+  }
+
+  results_df
+}
+
+permutation_test_lmer <- function(formula, data, group_var, subject_col, n_perm = 10000) {
+  # Fit original model and capture singularity warning
+  original_singular <- FALSE
+  original_model <- tryCatch({
+    withCallingHandlers(
+      lme4::lmer(formula, data = data, REML = FALSE),
+      warning = function(w) {
+        if (grepl("singular", w$message, ignore.case = TRUE)) {
+          original_singular <<- TRUE
+        }
+      }
+    )
+  }, error = function(e) {
+    stop("Error fitting original model: ", e$message)
+  })
+
+  original_fstat <- anova(original_model)$`F value`[1]
+
+  # Permutation test: shuffle group labels WITHIN each subject
+  perm_fstats <- numeric(n_perm)
+  singular_count <- 0L
+
+  for (i in seq_len(n_perm)) {
+    perm_data <- data %>%
+      dplyr::group_by(!!dplyr::sym(subject_col)) %>%
+      dplyr::mutate(
+        !!dplyr::sym(group_var) := sample(.data[[group_var]])
+      ) %>%
+      dplyr::ungroup()
+
+    # Fit permuted model and record F (handle singular fits/warnings)
+    tryCatch({
+      withCallingHandlers(
+        {
+          perm_model <- lme4::lmer(formula, data = perm_data, REML = FALSE)
+          perm_fstats[i] <- anova(perm_model)$`F value`[1]
+        },
+        warning = function(w) {
+          if (grepl("singular", w$message, ignore.case = TRUE)) {
+            singular_count <<- singular_count + 1L
+          }
+        }
+      )
+    }, error = function(e) {
+      perm_fstats[i] <- NA_real_
+    })
+  }
+
+  # Remove NAs and compute p-value (right-tail, as F is larger = more extreme)
+  perm_fstats <- perm_fstats[!is.na(perm_fstats)]
+  p_value <- mean(perm_fstats >= original_fstat, na.rm = TRUE)
+
+  list(
+    original_f = original_fstat,
+    p_value = p_value,
+    n_valid_perms = length(perm_fstats),
+    singular_warnings = singular_count,
+    original_singular = original_singular
+  )
+}
+```
+
+## Global params
+
+Global number of permutations and dirs
+
+```{r}
+library(dotenv)
+load_dot_env(file = "../.env")
+
+N_PERM = 100 #now to check if it run will return back to 10,000
+
+BASE_DIR    <- Sys.getenv("BASE_DIR")
+RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
+
+INPUT_DIR <- file.path(BASE_DIR)
+OUTPUT_DIR <- file.path(RESULTS_DIR, "stats", "02_caps")
+PLOTS_OUTPUT_DIR <- file.path(RESULTS_DIR, "main_figures", "05_caps_stats")
+
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(PLOTS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Occurence rate
+
+```{r}
+k=7
+occ_data <- prepare_df(file.path(INPUT_DIR, "caps_dynamics_run-ON", 
+                                 paste0("caps_nclust-", k), "CAP_occurence_times.csv"))
+str(occ_data)
+head(occ_data)
+```
+
+```{r}
+cap_var_names <- c("CAP1", "CAP2", "CAP3", "CAP4", "CAP5", "CAP6", "CAP7")
+occ_permutation_results <- get_perm_f_val_caps(
+  data = occ_data,
+  param_list = cap_var_names,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(occ_permutation_results)
+```
+
+## Dwell time
+
+```{r}
+k=7
+dt_data <- prepare_df(file.path(INPUT_DIR, "caps_dynamics_run-ON", 
+                                paste0("caps_nclust-", k), "CAP_dwelltime.csv"))
+str(dt_data)
+head(dt_data)
+```
+
+```{r}
+cap_var_names <- c("CAP1", "CAP2", "CAP3", "CAP4", "CAP5", "CAP6", "CAP7")
+dt_permutation_results <- get_perm_f_val_caps(
+  data = dt_data,
+  param_list = cap_var_names,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(dt_permutation_results)
+```
+
+## Transition probability
+
+```{r}
+tp_data <- prepare_df(file.path(INPUT_DIR, "caps_dynamics_run-ON", 
+                                paste0("caps_nclust-", k), "CAP_transitions_full.csv"))
+str(tp_data)
+head(tp_data)
+```
+
+```{r}
+tp_wide <- tp_data %>%
+  mutate(CAP_pair = paste0(from_CAP, "_", to_CAP)) %>%
+  pivot_wider(
+    id_cols = c(data_label, subject, session, run),  # keep these as identifiers
+    names_from = CAP_pair,
+    values_from = c(transition_probability),  # pivot both measures
+    values_fill = 0   # fill missing with 0
+  )
+str(tp_wide)
+head(tp_wide)
+cap_tp_cols <- grep("^CAP[0-9]+_CAP[0-9]+$", names(tp_wide), value = TRUE)
+cap_tp_cols
+```
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+#cap_tp_cols = c("CAP1_CAP7", "CAP6_CAP1")
+tp_permutation_results <- get_perm_f_val_caps(
+  data = tp_wide,
+  param_list = cap_tp_cols,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(tp_permutation_results)
+```
+
+## Save F permutation results
+
+```{r}
+# --- Omnibus permutation F-test results ---
+write.csv(occ_permutation_results,
+          file.path(OUTPUT_DIR, "perm_F_results_occ.csv"), row.names = FALSE)
+write.csv(dt_permutation_results,
+          file.path(OUTPUT_DIR, "perm_F_results_dt.csv"), row.names = FALSE)
+write.csv(tp_permutation_results_clean,
+          file.path(OUTPUT_DIR, "perm_F_results_tp.csv"), row.names = FALSE)
+```
+
+# Post-hoc permutation t-tests
+
+## Perm pair-wise t-tests function
+
+```{r}
+library(MKinfer)
+# Function to perform pairwise permutation t-tests with correction
+perform_pairwise_tests <- function(
+  caps_df,
+  cap_params,
+  n_perm = 10000,
+  correction_method = "bonferroni"
+) {
+  # NO seeding here - relies on parent function setting RNG state
+  
+  subject_col <- "subject"
+  condition_col <- "session"
+
+  # Comparisons (order matters for reporting)
+  comparisons <- list(
+    c("Unilateral", "Sham"),
+    c("Bilateral", "Sham"),
+    c("Bilateral", "Unilateral")
+  )
+
+  # Container for all parameters
+  results_df <- data.frame(
+    parameter = character(),
+    comparison = character(),
+    n_pairs = integer(),
+    statistic = numeric(),
+    p_value = numeric(),
+    p_corrected = numeric(),
+    cohens_d = numeric(),
+    significance = character(),
+    stringsAsFactors = FALSE
+  )
+
+  for (param in cap_params) {
+    
+    # Collect this parameter's three pairwise tests
+    param_results <- data.frame(
+      parameter = character(),
+      comparison = character(),
+      n_pairs = integer(),
+      statistic = numeric(),
+      p_value = numeric(),
+      cohens_d = numeric(),
+      stringsAsFactors = FALSE
+    )
+
+    for (comp in comparisons) {
+      cond1 <- comp[1]
+      cond2 <- comp[2]
+
+      # 1) Subset to the two conditions + subject + current param
+      sub_df <- caps_df[caps_df[[condition_col]] %in% c(cond1, cond2),
+                        c(subject_col, condition_col, param)]
+      names(sub_df) <- c(subject_col, condition_col, "y")
+
+      # 2) Wide by condition to align pairs by subject
+      wide <- tidyr::pivot_wider(
+        sub_df,
+        id_cols = tidyselect::all_of(subject_col),
+        names_from = tidyselect::all_of(condition_col),
+        values_from = "y"
+      )
+
+      # Keep only rows where both conditions are present (paired)
+      if (!all(c(cond1, cond2) %in% names(wide))) {
+        data1 <- numeric(0)
+        data2 <- numeric(0)
+      } else {
+        wide <- wide[stats::complete.cases(wide[, c(cond1, cond2), drop = FALSE]), , drop = FALSE]
+        data1 <- wide[[cond1]]
+        data2 <- wide[[cond2]]
+      }
+
+      # If too few pairs, store NA row
+      if (length(data1) < 2L) {
+        param_results <- rbind(param_results,
+          data.frame(
+            parameter = param,
+            comparison = paste(cond1, "vs", cond2),
+            n_pairs = length(data1),
+            statistic = NA_real_,
+            p_value = NA_real_,
+            cohens_d = NA_real_,
+            stringsAsFactors = FALSE
+          )
+        )
+        next
+      }
+
+      # 3) Permutation paired t-test (uses current RNG state)
+      perm_test <- MKinfer::perm.t.test(data1, data2, paired = TRUE, R = n_perm)
+
+      # 4) Cohen's d for paired data
+      dvals <- data1 - data2
+      cohens_d_val <- mean(dvals, na.rm = TRUE) / stats::sd(dvals, na.rm = TRUE)
+
+      # 5) Collect results
+      param_results <- rbind(param_results,
+        data.frame(
+          parameter = param,
+          comparison = paste(cond1, "vs", cond2),
+          n_pairs = length(dvals),
+          statistic = unname(perm_test$statistic),
+          p_value = unname(perm_test$p.value),
+          cohens_d = cohens_d_val,
+          stringsAsFactors = FALSE
+        )
+      )
+    }
+
+    # 6) Multiple-comparison correction within this parameter (across its 3 tests)
+    param_results$p_corrected <- stats::p.adjust(param_results$p_value, method = correction_method)
+
+    # 7) Significance marks
+    param_results$significance <- ifelse(!is.na(param_results$p_corrected) & param_results$p_corrected < 0.05, "**",
+                                  ifelse(!is.na(param_results$p_value)     & param_results$p_value     < 0.05, "*",
+                                  ifelse(!is.na(param_results$p_value)     & param_results$p_value     < 0.10, ".", "")))
+
+    # 8) Append to all results
+    results_df <- rbind(results_df,
+                        param_results[, c("parameter","comparison","n_pairs","statistic","p_value","p_corrected","cohens_d","significance")])
+  }
+
+  # Significant-only view
+  sig_results <- subset(results_df, significance %in% c(".", "*", "**"))
+
+  list(
+    all_results = results_df,
+    significant_results = sig_results
+  )
+}
+
+
+# Post-hoc permutation t-tests for significant F-tests
+run_posthoc_permutation <- function(
+  f_results_df,
+  caps_df,
+  alpha = 0.05,
+  n_perm = 10000,
+  seed = 123,
+  correction_method = "bonferroni"
+) {
+  
+  base_seed <- seed
+  subject_col   <- "subject"
+  condition_col <- "session"
+
+  # Which parameters are significant at the omnibus level
+  sig_params <- f_results_df$parameter[f_results_df$p_value < alpha] 
+  
+  if (length(sig_params) == 0L) {
+    message("No parameters passed the F-test threshold; nothing to run post-hoc on.")
+    return(list(all = data.frame(), by_param = list()))
+  }
+
+  all_posthoc <- list()
+
+  for (i in seq_along(sig_params)) {
+    param <- sig_params[i]
+    
+    # Set seed ONCE for this parameter (covers all 3 comparisons)
+    if (!is.null(base_seed)) {
+      set.seed(base_seed + i - 1)
+    }
+    
+    # Use all data (NO outlier removal)
+    filtered_df <- caps_df
+
+    # Run the paired permutation post-hoc comparisons for THIS param only
+    ph <- perform_pairwise_tests(
+      caps_df = filtered_df,
+      cap_params = param, 
+      n_perm = n_perm,
+      correction_method = correction_method
+    )
+
+    all_posthoc[[param]] <- ph$all_results
+  }
+
+  combined <- do.call(rbind, all_posthoc)
+
+  # Return both a combined df and split-by-parameter list
+  list(
+    all = combined[order(combined$parameter, combined$comparison), ],
+    by_param = all_posthoc
+  )
+}
+# Small helper for null-coalescing (replace NULL/NA with "")
+`%||%` <- function(a, b) {
+  if (is.null(a) || (length(a) == 1 && is.na(a))) b else a
+}
+
+```
+
+## Occurence rate
+
+```{r}
+occ_posthoc <- run_posthoc_permutation(
+  f_results_df = occ_permutation_results,
+  caps_df = occ_data,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+occ_posthoc$all
+```
+
+## Dwell time
+
+```{r}
+dt_posthoc <- run_posthoc_permutation(
+  f_results_df = dt_permutation_results,
+  caps_df = dt_data,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+dt_posthoc$all
+```
+
+## Transition Probability
+
+```{r}
+tp_permutation_results_clean <- tp_permutation_results %>%
+  filter(!is.nan(f_statistic))
+head(tp_permutation_results_clean)
+str(tp_permutation_results_clean)
+```
+
+```{r}
+tp_posthoc <- run_posthoc_permutation(
+  f_results_df = tp_permutation_results_clean,
+  caps_df = tp_wide,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+tp_posthoc$all
+```
+
+## Save post-hoc permutation results
+
+```{r}
+# --- Post-hoc permutation t-test results ---
+write.csv(occ_posthoc$all,
+          file.path(OUTPUT_DIR, "perm_posthoc_occ.csv"), row.names = FALSE)
+write.csv(dt_posthoc$all,
+          file.path(OUTPUT_DIR, "perm_posthoc_dt.csv"), row.names = FALSE)
+write.csv(tp_posthoc$all,
+          file.path(OUTPUT_DIR, "perm_posthoc_tp.csv"), row.names = FALSE)
+
+# --- Optional: Save RDS versions (keeps attributes and list structure) ---
+saveRDS(list(F = occ_permutation_results, posthoc = occ_posthoc),
+        file.path(OUTPUT_DIR, "occ_results.rds"))
+saveRDS(list(F = dt_permutation_results, posthoc = dt_posthoc),
+        file.path(OUTPUT_DIR, "dt_results.rds"))
+saveRDS(list(F = tp_permutation_results_clean, posthoc = tp_posthoc),
+        file.path(OUTPUT_DIR, "tp_results.rds"))
+
+# --- Metadata for reproducibility ---
+meta <- data.frame(
+  k = 7,
+  N_PERM = N_PERM,
+  timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+  stringsAsFactors = FALSE
+)
+write.csv(meta, file.path(OUTPUT_DIR, "run_metadata.csv"), row.names = FALSE)
+```
+
+## Read saved reults
+
+```{r}
+safe_read_csv <- function(path) {
+  tryCatch(
+    read.csv(path),
+    error = function(e) {
+      message("Could not read ", basename(path), " — returning empty dataframe")
+      data.frame()
+    }
+  )
+}
+
+occ_permutation_results <- safe_read_csv(file.path(OUTPUT_DIR, "perm_F_results_occ.csv"))
+dt_permutation_results  <- safe_read_csv(file.path(OUTPUT_DIR, "perm_F_results_dt.csv"))
+tp_permutation_results <- safe_read_csv(file.path(OUTPUT_DIR, "perm_F_results_tp.csv"))
+
+occ_posthoc_all <- safe_read_csv(file.path(OUTPUT_DIR, "perm_posthoc_occ.csv"))
+dt_posthoc_all  <- safe_read_csv(file.path(OUTPUT_DIR, "perm_posthoc_dt.csv"))
+tp_posthoc_all  <- safe_read_csv(file.path(OUTPUT_DIR, "perm_posthoc_tp.csv"))
+
+```
+
+# Plot OCC and DT
+
+```{r}
+################################################################################
+####### Create box plots and bar plots of occurrence rate and dwell time #######
+################################################################################
+
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(knitr)
+library(emmeans)
+library(knitr)
+library(ggpubr)
+library(rstatix)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(knitr)
+library(emmeans)
+library(knitr)
+library(ggpubr)
+library(rstatix)
+library(sjPlot)
+library(sjtable2df)
+library(report)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(performance)
+library(gridExtra)
+library(grid)
+library(patchwork)
+
+ 
+
+prepare_df_only_on <- function(file_path) {
+  # Read data from the provided file path
+  data <- read.csv(file_path)
+  
+  # Clean up columns: remove original session/run and rename _name columns
+  data <- data %>%
+    select(-session, -run) %>%
+    rename(session = session_name, run = run_name)
+  
+  # Filter to include only "On" data
+  data_on <- data %>% filter(run == "tDCS On")
+  
+  # Convert factors with proper reference levels
+  data_on$session <- factor(data_on$session, levels = c("Sham", "Unilateral", "Bilateral"))
+  data_on$subject <- factor(data_on$subject)
+  return(data_on)
+}
+
+plot_cap_stats_only_on <- function(data_on, k, data_type, data_type_out_str) {
+  cap_cols <- grep("^CAP\\d+$", colnames(data_on), value = TRUE)
+  data_on$session <- factor(data_on$session, levels = c("Unilateral", "Bilateral", "Sham"))
+  
+  if (length(cap_cols) == 0) {
+    stop("No columns with the pattern 'CAPn' found in the data")
+  }
+  
+  # Convert data to long format for easier plotting
+  data_long <- data_on %>%
+    pivot_longer(
+      cols = all_of(cap_cols),
+      names_to = "CAP",
+      values_to = "value"
+    )
+  
+  # Calculate mean and SD by CAP and session
+  stats_by_group <- data_long %>%
+    group_by(CAP, session) %>%
+    summarize(
+      mean_value = mean(value, na.rm = TRUE),
+      sd_value = sd(value, na.rm = TRUE),
+      se_value = sd_value / sqrt(n()),
+      n = n(),
+      .groups = "drop"
+    )
+  
+  # Create a plot of means with error bars (using SE instead of SD)
+  p1 <- ggplot(stats_by_group, aes(x = CAP, y = mean_value, fill = session)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8) +
+    geom_errorbar(
+      aes(ymin = mean_value - se_value, ymax = mean_value + se_value),
+      position = position_dodge(width = 0.8),
+      width = 0.25
+    ) +
+    scale_fill_manual(values = c("Unilateral" = "#e3d54a", "Bilateral" = "#da4f33", "Sham" = "#66a6ba")) +
+    labs(
+      title = "",
+      subtitle = "Error bars represent standard error",
+      x = "",
+      y = paste("\n\n", data_type),
+      fill = "Session"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",  # Remove legend from plot
+      plot.title = element_text(face = "bold", size=20),
+      plot.subtitle = element_text(size=20),
+      axis.text = element_text(size = 16),
+      axis.title = element_text(size = 18),
+      legend.title = element_text(face = "bold", size = 18),
+      axis.title.y = element_text(margin = margin(r = 15)),
+      legend.text = element_text(size = 16),    
+      strip.text = element_text(face = "bold", size = 18), 
+      panel.grid.major.x = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      # Add axis frames
+      axis.line = element_line(color = "black", size = 0.5),
+      panel.border = element_blank()
+    )
+  
+  # Save individual plots
+  ggsave(file.path(PLOTS_OUTPUT_DIR, paste0("mean_se_", data_type_out_str, ".png")), 
+         p1, width = 9, height = 4, dpi = 400)
+  
+  # Create boxplot with data points
+  p2 <- ggplot(data_long, aes(x = CAP, y = value, fill = session)) +
+    geom_boxplot(position = position_dodge(width = 0.8,), 
+                 width = 0.7, 
+                 alpha = 0.7) +
+    scale_fill_manual(values = c("Unilateral" = "#e3d54a", "Bilateral" = "#da4f33", "Sham" = "#66a6ba")) +
+    geom_point(
+      aes(fill = session),
+      position = position_jitterdodge(dodge.width = 0.8, jitter.width = 0.2),
+      shape = 21,
+      size = 1.5,
+      alpha = 0.6,
+      stroke = 0.5,
+      color = "black",
+      show.legend = FALSE
+    ) +
+    labs(
+      title = "",
+      x = "",
+      y = paste("\n\n", data_type),
+      fill = "Session"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",  # Remove legend from plot
+      plot.title = element_text(face = "bold", size=20),
+      plot.subtitle = element_text(size=20),
+      axis.text = element_text(size = 16),
+      axis.title = element_text(size = 18),
+      legend.title = element_text(face = "bold", size = 18),
+      axis.title.y = element_text(margin = margin(r = 15)),
+      legend.text = element_text(size = 16),    
+      strip.text = element_text(face = "bold", size = 18), 
+      panel.grid.major.x = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      # Add axis frames
+      axis.line = element_line(color = "black", size = 0.5),
+      panel.border = element_blank()
+    )
+  
+  ggsave(file.path(PLOTS_OUTPUT_DIR, paste0("R_box_plot_only_on_", data_type_out_str, ".png")), 
+         p2, width = 9, height = 4, dpi = 400)
+  
+  # Create a simple plot just to generate the legend
+  legend_data <- data.frame(
+    x = rep(1, 3),
+    y = rep(1, 3), 
+    session = factor(c("Unilateral", "Bilateral", "Sham"), levels = c("Unilateral", "Bilateral", "Sham"))
+  )
+  
+  legend_plot <- ggplot(legend_data, aes(x = x, y = y, fill = session)) +
+    geom_col(width = 0.7, alpha = 0.8) +  # Use same geom as main plots
+    scale_fill_manual(values = c("Unilateral" = "#e3d54a", "Bilateral" = "#da4f33", "Sham" = "#66a6ba")) +
+    labs(fill = "") +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold", size = 18),
+      legend.text = element_text(size = 16),
+      legend.margin = margin(0, 0, 0, 0),  # Remove legend margins
+      legend.box.margin = margin(0, 0, 0, 0)  # Remove legend box margins
+    )
+  tmp <- ggplot_gtable(ggplot_build(legend_plot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend_only <- tmp$grobs[[leg]]
+  
+  # Save the legend as a separate plot in the same directory as box plots
+  ggsave(file.path(PLOTS_OUTPUT_DIR, paste0("legend_", data_type_out_str, ".png")), 
+         legend_only, width = 6, height = 1, dpi = 400, bg = "transparent")
+  
+  # Return the plot objects, legend, and stats data
+  return(list(
+    bar_plot = p1,
+    box_plot = p2, 
+    legend = legend_only,
+    stats = stats_by_group
+  ))
+}
+
+k=7
+occ_results <- plot_cap_stats_only_on(occ_data, k=k, data_type="Occurrence Rate", data_type_out_str="occ_rate")
+dt_results <- plot_cap_stats_only_on(dt_data, k=k, data_type="Dwell Time", data_type_out_str="dwell_time")
+
+# Combine plots vertically with patchwork for perfect alignment
+combined_plot <- occ_results$box_plot / dt_results$box_plot  
+print(combined_plot)
+ggsave(file.path(PLOTS_OUTPUT_DIR, "box_plot_combined_dwell_occurrence.png"), 
+       combined_plot, width = 9, height = 8, dpi = 400)
+```
+
+## Correlation between DT and OCC
+
+```{r}
+corr_method <- "spearman"
+
+df_occ_sham <- occ_data[occ_data$session == "Sham", ]
+df_dt_sham  <- dt_data[dt_data$session == "Sham", ]
+correlation <- cor.test(df_occ_sham$CAP4, df_dt_sham$CAP4, method = corr_method)
+
+cat("Correlation in the sham stimulation------------------------------------\n")
+correlation
+
+
+df_occ_bi <- occ_data[occ_data$session == "Bilateral", ]
+df_dt_bi  <- dt_data[dt_data$session == "Bilateral", ]
+correlation <- cor.test(df_occ_bi$CAP4, df_dt_bi$CAP4, method = corr_method)
+
+cat("Correlation in the Bilateral stimulation-------------------------------\n")
+correlation
+
+
+df_occ_uni <- occ_data[occ_data$session == "Unilateral", ]
+df_dt_uni  <- dt_data[dt_data$session == "Unilateral", ]
+correlation <- cor.test(df_occ_uni$CAP4, df_dt_uni$CAP4, method = corr_method)
+
+cat("Correlation in the Unilateral stimulation------------------------------\n")
+correlation
+```

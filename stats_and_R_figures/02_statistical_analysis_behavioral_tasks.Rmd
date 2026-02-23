@@ -1,0 +1,1467 @@
+---
+title: "Statistical analysis of behavioral tasks  paramters"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-05-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+
+
+## Overview
+
+This notebook tests whether tDCS (sham, unilateral, bilateral) affects behavioral performance across four motor tasks: **APM** (Arm Position Matching), **VGR** (Visually Guided Reaching), **OH** (Object Hit), and **BOB** (Ball on Bar).
+
+Analysis pipeline:
+
+1. **Omnibus test**: within-subject permutation LMER F-test (`param ~ stimulation_condition + (1|subject)`) for each behavioral parameter, with condition labels shuffled within each subject.
+2. **Post-hoc**: paired permutation t-tests for the three pairwise comparisons (unilateral vs sham, bilateral vs sham, bilateral vs unilateral), with Bonferroni correction applied within each parameter.
+3. **Learning effect check**: LMER F-test (`param ~ session_no + (1|subject)`) to verify no session-order effects.
+4. **Plots**: boxplots of key significant parameters saved to `PLOTS_OUTPUT_DIR`.
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(janitor)
+library(ggpubr)
+library(rstatix)
+library(tidyverse)
+library(gtsummary)
+library(knitr)
+library(ggrepel)
+library(rstatix)
+library(sjPlot)
+library(sjtable2df)
+library(GGally)
+library(MKinfer)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(knitr)
+library(emmeans)
+library(knitr)
+library(gt)
+```
+
+
+# LMER permutation F-tets  
+
+## Perm F-test functions
+
+```{r}
+get_perm_f_val_task_parmas <- function(data, param_list, n_perm = 1000,
+                                        print_progress = TRUE, seed = 123) {
+  # Fixed columns / reference
+  subject_col <- "subject"
+  condition_col <- "stimulation_condition"
+  ref_level <- "sham"
+
+  # Store base seed for parameter-specific seeding
+  base_seed <- seed
+
+  # Ensure factor with reference level
+  data[[condition_col]] <- relevel(as.factor(data[[condition_col]]), ref = ref_level)
+
+  results_df <- data.frame(
+    parameter = character(),
+    f_statistic = numeric(),
+    p_value = numeric(),
+    n_valid_perms = integer(),
+    n_obs = integer(),
+    singular_warnings = integer(),
+    original_singular = logical(),
+    significance = character(),
+    stringsAsFactors = FALSE
+  )
+
+  for (i in seq_along(param_list)) {
+    param <- param_list[i]
+    
+    # Set parameter-specific seed for reproducibility
+    if (!is.null(base_seed)) {
+      set.seed(base_seed + i - 1)
+    }
+    
+    if (print_progress) {
+      cat("##########################\n")
+      cat("Within-Subject Permutation Test for:", param, "\n")
+      if (!is.null(base_seed)) {
+        cat("Seed:", base_seed + i - 1, "\n")
+      }
+    }
+
+    # formula y ~ condition + (1|subject)
+    formula <- as.formula(sprintf("%s ~ %s + (1|%s)", param, condition_col, subject_col))
+    if (print_progress) cat("Formula:", deparse(formula), "\n")
+
+    # Select data for this parameter (no outlier removal)
+    model_df <- data %>%
+      dplyr::select(dplyr::all_of(c(subject_col, condition_col, param))) %>%
+      dplyr::filter(!is.na(.data[[param]]))  # Only remove missing values
+
+    n_obs <- nrow(model_df)
+    n_subjects <- dplyr::n_distinct(model_df[[subject_col]])
+
+    if (print_progress) {
+      cat("Total observations:", n_obs, "\n")
+      cat("Number of subjects:", n_subjects, "\n")
+    }
+
+    # Check if enough data
+    if (n_obs == 0 || n_subjects < 2) {
+      if (print_progress) cat("Not enough data. Skipping", param, "\n\n")
+      results_df <- rbind(
+        results_df,
+        data.frame(
+          parameter = param,
+          f_statistic = NA_real_,
+          p_value = NA_real_,
+          n_valid_perms = 0L,
+          n_obs = n_obs,
+          singular_warnings = NA_integer_,
+          original_singular = NA,
+          significance = "ns",
+          stringsAsFactors = FALSE
+        )
+      )
+      next
+    }
+
+    # Call permutation (uses current RNG state from set.seed above)
+    perm_result <- permutation_test_lmer(
+      formula = formula,
+      data = model_df,
+      group_var = condition_col,
+      subject_col = subject_col,
+      n_perm = n_perm
+    )
+
+    sig_level <- ifelse(perm_result$p_value < 0.001, "***",
+                 ifelse(perm_result$p_value < 0.01,  "**",
+                 ifelse(perm_result$p_value < 0.05,  "*", "ns")))
+
+    results_df <- rbind(
+      results_df,
+      data.frame(
+        parameter = param,
+        f_statistic = perm_result$original_f,
+        p_value = perm_result$p_value,
+        n_valid_perms = perm_result$n_valid_perms,
+        n_obs = n_obs,
+        singular_warnings = perm_result$singular_warnings,
+        original_singular = perm_result$original_singular,
+        significance = sig_level,
+        stringsAsFactors = FALSE
+      )
+    )
+
+    if (print_progress) {
+      cat("\n")
+      cat("Original model singular:", perm_result$original_singular, "\n")
+      cat("Singular warnings in permutations:", perm_result$singular_warnings, "out of", n_perm, "\n")
+      cat("Original F-statistic:", perm_result$original_f, "\n")
+      cat("Permutation p-value:", perm_result$p_value, "\n")
+      cat("Valid permutations:", perm_result$n_valid_perms, "out of", n_perm, "\n")
+      cat("Significance:", sig_level, "\n\n")
+    }
+  }
+
+  results_df
+}
+
+permutation_test_lmer <- function(formula, data, group_var, subject_col, n_perm = 1000) {
+  # Fit original model and capture singularity warning
+  original_singular <- FALSE
+  original_model <- tryCatch({
+    withCallingHandlers(
+      lme4::lmer(formula, data = data, REML = FALSE),
+      warning = function(w) {
+        if (grepl("singular", w$message, ignore.case = TRUE)) {
+          original_singular <<- TRUE
+        }
+      }
+    )
+  }, error = function(e) {
+    stop("Error fitting original model: ", e$message)
+  })
+
+  original_fstat <- anova(original_model)$`F value`[1]
+
+  # Permutation test: shuffle group labels WITHIN each subject
+  perm_fstats <- numeric(n_perm)
+  singular_count <- 0L
+
+  for (i in seq_len(n_perm)) {
+    perm_data <- data %>%
+      dplyr::group_by(!!dplyr::sym(subject_col)) %>%
+      dplyr::mutate(
+        !!dplyr::sym(group_var) := sample(.data[[group_var]])
+      ) %>%
+      dplyr::ungroup()
+
+    # Fit permuted model and record F (handle singular fits/warnings)
+    tryCatch({
+      withCallingHandlers(
+        {
+          perm_model <- lme4::lmer(formula, data = perm_data, REML = FALSE)
+          perm_fstats[i] <- anova(perm_model)$`F value`[1]
+        },
+        warning = function(w) {
+          if (grepl("singular", w$message, ignore.case = TRUE)) {
+            singular_count <<- singular_count + 1L
+          }
+        }
+      )
+    }, error = function(e) {
+      perm_fstats[i] <- NA_real_
+    })
+  }
+
+  # Remove NAs and compute p-value (right-tail, as F is larger = more extreme)
+  perm_fstats <- perm_fstats[!is.na(perm_fstats)]
+  p_value <- mean(perm_fstats >= original_fstat, na.rm = TRUE)
+
+  list(
+    original_f = original_fstat,
+    p_value = p_value,
+    n_valid_perms = length(perm_fstats),
+    singular_warnings = singular_count,
+    original_singular = original_singular
+  )
+}
+```
+
+
+## Global params
+
+Global number of permutations and dirs
+
+```{r}
+library(dotenv)
+load_dot_env(file = "../.env")
+
+N_PERM = 100
+
+BASE_DIR    <- Sys.getenv("BASE_DIR")
+RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
+BEH_DATA_ANON_DIR <- Sys.getenv("BEH_DATA_ANON_DIR")
+
+INPUT_DIR <- file.path(BEH_DATA_ANON_DIR, "csv")
+OUTPUT_DIR <- file.path(RESULTS_DIR, "stats", "01_behavioral_tasks")
+PLOTS_OUTPUT_DIR <- file.path(RESULTS_DIR, "main_figures", "04_behavioral_tasks")
+
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(PLOTS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+```
+
+## APM 
+
+
+Left hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR, "APM_left_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR, "APM_left_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR, "APM_left_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness, 
+                                  stimulation_condition, active_arm,  
+                                  abs_error_x_m, 
+                                  abs_error_y_m, 
+                                  variability_x_m,
+                                  variability_y_m,
+                                  contraction_expansion_ratio_x,
+                                  contraction_expansion_ratio_y,
+                                  shift_x_m,
+                                  shift_y_m)
+#comb_data <- comb_data %>% rename(contra_expa_ratio_xy = contraction_expansion_ratio_xy)
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+comb_data_l <- comb_data
+table(comb_data_l$stimulation_condition)
+head(comb_data_l)
+```
+
+Righ hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR,"APM_right_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR,"APM_right_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR,"APM_right_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, 
+                                         fraction_complete, handedness,
+                                         stimulation_condition, active_arm,
+                                         abs_error_x_m, 
+                                          abs_error_y_m, 
+                                          variability_x_m,
+                                          variability_y_m,
+                                          contraction_expansion_ratio_x,
+                                          contraction_expansion_ratio_y,
+                                          shift_x_m,
+                                          shift_y_m)
+
+
+#comb_data <- comb_data %>% rename(contra_expa_ratio_xy = contraction_expansion_ratio_xy)
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+comb_data_r <- comb_data
+table(comb_data_r$stimulation_condition)
+head(comb_data_r)
+```
+
+```{r}
+conatinated_apm <- rbind(comb_data_l, comb_data_r)
+head(conatinated_apm)
+tail(conatinated_apm)
+str(conatinated_apm)
+```
+
+```{r}
+apm_wide <- conatinated_apm %>%
+  mutate(arm_prefix = ifelse(active_arm == "LEFT", "LH", "RH")) %>%
+  pivot_wider(
+    id_cols = c("subject", "neuron_id", "handedness",
+                "session_no","stimulation_condition"),
+    names_from = arm_prefix,
+    values_from = c(
+      "fraction_complete", 
+      "abs_error_x_m",
+      "abs_error_y_m",
+      "variability_x_m",
+      "variability_y_m",
+      "contraction_expansion_ratio_x",
+      "contraction_expansion_ratio_y",
+      "shift_x_m",
+      "shift_y_m"
+    ),
+    names_glue = "{arm_prefix}_{.value}"
+  )
+
+str(apm_wide)
+
+head(apm_wide)
+```
+
+```{r, results='hide'}
+apm_behavior_vars <- c(
+  "abs_error_x_m",
+  "abs_error_y_m",
+  "variability_x_m",
+  "variability_y_m",
+  "contraction_expansion_ratio_x",
+  "contraction_expansion_ratio_y",
+  "shift_x_m",
+  "shift_y_m"
+  )
+
+apm_behavior_vars_lh <- paste0("LH_", apm_behavior_vars)
+apm_behavior_vars_rh <- paste0("RH_", apm_behavior_vars)
+
+# Combine both LH and RH behavior variables
+apm_behavior_vars_both_hands <- c(apm_behavior_vars_lh, apm_behavior_vars_rh)
+```
+
+
+```{r}
+apm_permutation_results <- get_perm_f_val_task_parmas(
+  data = apm_wide,
+  param_list = apm_behavior_vars_both_hands,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(as.data.frame(apm_permutation_results), digits = 4)
+```
+
+
+## VGR 
+
+Left hand
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR,"VGR_left_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR,"VGR_left_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR,"VGR_left_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness, 
+                                  stimulation_condition, active_arm,  
+                                  posture_speed_m_s, 
+                                  reaction_time_s,
+                                  initial_direction_angle_rad,
+                                  initial_distance_ratio,
+                                  initial_speed_ratio,
+                                  speed_maxima_count,
+                                  movement_time_s,
+                                  path_length_ratio,
+                                  false_starts)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+comb_data_l <- comb_data
+table(comb_data_l$stimulation_condition)
+head(comb_data_l)
+```
+
+Right hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR,"VGR_right_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR,"VGR_right_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR,"VGR_right_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness, 
+                                  stimulation_condition, active_arm, 
+                                  posture_speed_m_s, 
+                                  reaction_time_s,
+                                  initial_direction_angle_rad,
+                                  initial_distance_ratio,
+                                  initial_speed_ratio,
+                                  speed_maxima_count,
+                                  movement_time_s,
+                                  path_length_ratio,
+                                  false_starts)
+
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+comb_data_r <- comb_data
+table(comb_data_r$stimulation_condition)
+head(comb_data_r)
+```
+
+```{r}
+conatinated_vgr <- rbind(comb_data_l, comb_data_r)
+head(conatinated_vgr)
+tail(conatinated_vgr)
+str(conatinated_vgr)
+```
+
+```{r}
+vgr_wide <- conatinated_vgr %>%
+  mutate(arm_prefix = ifelse(active_arm == "LEFT", "LH", "RH")) %>%
+  pivot_wider(
+    id_cols = c("subject", "neuron_id", "handedness", 
+                "session_no", "stimulation_condition"),
+    names_from = arm_prefix,
+    values_from = c("fraction_complete", 
+                    "posture_speed_m_s", 
+                    "reaction_time_s", 
+                    "initial_direction_angle_rad", 
+                    "initial_distance_ratio", 
+                    "initial_speed_ratio", 
+                    "speed_maxima_count",
+                    "movement_time_s", 
+                    "path_length_ratio", 
+                    "false_starts"
+    ),
+    names_glue = "{arm_prefix}_{.value}"
+  )
+
+str(vgr_wide)
+
+head(vgr_wide)
+```
+
+```{r, results='hide'}
+vgr_behavior_vars <- c("posture_speed_m_s", 
+                       "reaction_time_s", 
+                       "initial_direction_angle_rad", 
+                       "initial_distance_ratio", 
+                       "initial_speed_ratio", 
+                       "speed_maxima_count",
+                       "movement_time_s", 
+                       "path_length_ratio", 
+                       "false_starts")
+
+vgr_behavior_vars_lh <- paste0("LH_", vgr_behavior_vars)
+vgr_behavior_vars_rh <- paste0("RH_", vgr_behavior_vars)
+
+# Combine both LH and RH behavior variables
+vgr_behavior_vars_both_hands <- c(vgr_behavior_vars_lh, vgr_behavior_vars_rh)
+```
+
+
+```{r}
+vgr_permutation_results <- get_perm_f_val_task_parmas(
+  data = vgr_wide,
+  param_list = vgr_behavior_vars_both_hands,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(vgr_permutation_results)
+```
+
+## BOB
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR,"BOB_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR,"BOB_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR,"BOB_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness, 
+                                  stimulation_condition, active_arm, 
+                                  x1_targets_completed,
+                                  x2_targets_completed,
+                                  x3_targets_completed,
+                                  #x2_drops,#variance=0
+                                  x3_drops,#
+                                  #x2_drops_targets,##variance=0
+                                  x3_drops_targets,#
+                                  x1_mean_movement_time_s,
+                                  x2_mean_movement_time_s,
+                                  x3_mean_movement_time_s,
+                                  x1_right_hand_speed_maxima,
+                                  x2_right_hand_speed_maxima,
+                                  x3_right_hand_speed_maxima,
+                                  x1_left_hand_speed_maxima,
+                                  x2_left_hand_speed_maxima,
+                                  x3_left_hand_speed_maxima,
+                                  x1_mean_bar_angle_rad,
+                                  x2_mean_bar_angle_rad,
+                                  x3_mean_bar_angle_rad,
+                                  x1_bar_length_variability,#
+                                  x2_bar_length_variability,#
+                                  x3_bar_length_variability,#
+                                  x1_reaction_time_abs_diff_s,
+                                  x1_hand_speed_diff_m_s,
+                                  x2_hand_speed_diff_m_s,
+                                  x3_hand_speed_diff_m_s,
+                                  x1_mean_right_hand_speed_m_s,
+                                  x2_mean_right_hand_speed_m_s, 
+                                  x3_mean_right_hand_speed_m_s,
+                                  x1_mean_left_hand_speed_m_s,
+                                  x2_mean_left_hand_speed_m_s, 
+                                  x3_mean_left_hand_speed_m_s, 
+                                  x1_mean_bar_angle_rad,
+                                  x2_mean_bar_angle_rad,
+                                  x3_mean_bar_angle_rad,
+                                  x1_stdev_bar_angle_rad,
+                                  x2_stdev_bar_angle_rad,
+                                  x3_stdev_bar_angle_rad,
+                                  x1_norm_absolute_hand_speed_diff,
+                                  x2_norm_absolute_hand_speed_diff,
+                                  x3_norm_absolute_hand_speed_diff,
+                                  x1_hand_speed_peak_bias,
+                                  x2_hand_speed_peak_bias,
+                                  x3_hand_speed_peak_bias,
+                                  x1_hand_path_bias,
+                                  x2_hand_path_bias,
+                                  x3_hand_path_bias 
+                                  )
+
+bob_behavior_vars <- c(
+  "x1_targets_completed",
+  "x2_targets_completed",
+  "x3_targets_completed",
+  #"x2_drops", #variance=0
+  "x3_drops",
+  #"x2_drops_targets", #variance=0
+  "x3_drops_targets",
+  "x1_mean_movement_time_s",
+  "x2_mean_movement_time_s",
+  "x3_mean_movement_time_s",
+  "x1_right_hand_speed_maxima",
+  "x2_right_hand_speed_maxima",
+  "x3_right_hand_speed_maxima",
+  "x1_left_hand_speed_maxima",
+  "x2_left_hand_speed_maxima",
+  "x3_left_hand_speed_maxima",
+  "x1_mean_bar_angle_rad",
+  "x2_mean_bar_angle_rad",
+  "x3_mean_bar_angle_rad",
+  "x1_bar_length_variability",
+  "x2_bar_length_variability",
+  "x3_bar_length_variability",
+  "x1_reaction_time_abs_diff_s",
+  "x1_hand_speed_diff_m_s",
+  "x2_hand_speed_diff_m_s",
+  "x3_hand_speed_diff_m_s", 
+  "x1_mean_right_hand_speed_m_s",
+  "x2_mean_right_hand_speed_m_s", 
+  "x3_mean_right_hand_speed_m_s",
+  "x1_mean_left_hand_speed_m_s",
+  "x2_mean_left_hand_speed_m_s", 
+  "x3_mean_left_hand_speed_m_s",
+  "x1_mean_bar_angle_rad",
+  "x2_mean_bar_angle_rad",
+  "x3_mean_bar_angle_rad",
+  "x1_stdev_bar_angle_rad",
+  "x2_stdev_bar_angle_rad",
+  "x3_stdev_bar_angle_rad",
+  "x1_norm_absolute_hand_speed_diff",
+  "x2_norm_absolute_hand_speed_diff",
+  "x3_norm_absolute_hand_speed_diff",
+  "x1_hand_speed_peak_bias",
+  "x2_hand_speed_peak_bias",
+  "x3_hand_speed_peak_bias",
+  "x1_hand_path_bias",
+  "x2_hand_path_bias",
+  "x3_hand_path_bias" 
+)
+
+# Convert all numeric variables
+comb_data <- comb_data %>%
+  mutate(across(all_of(bob_behavior_vars), as.numeric))
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+bob_data <- comb_data
+table(bob_data$stimulation_condition)
+head(bob_data)
+```
+
+```{r}
+bob_permutation_results <- get_perm_f_val_task_parmas(
+  data = bob_data,
+  param_list = bob_behavior_vars,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(bob_permutation_results)
+```
+
+## OH
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR,"OH_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR,"OH_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR,"OH_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% select(neuron_id, session_no, fraction_complete, 
+                                  handedness, stimulation_condition, active_arm, 
+                                  total_hits,
+                                  hits_with_left,
+                                  hits_with_right,
+                                  hand_bias_of_hits,
+                                  median_error,
+                                  miss_bias,
+                                  hand_speed_right_m_s,
+                                  hand_speed_left_m_s,
+                                  hand_speed_bias,
+                                  movement_area_right_hand_m_2, 
+                                  movement_area_left_hand_m_2,
+                                  movement_area_bias,
+                                  hand_transition,
+                                  hand_selection_overlap)
+
+oh_behavior_vars <- c("total_hits", 
+                   "hits_with_left", 
+                   "hits_with_right", 
+                   "hand_bias_of_hits",
+                   "median_error", 
+                   "miss_bias", 
+                   "hand_speed_right_m_s",
+                   "hand_speed_left_m_s", 
+                   "hand_speed_bias", 
+                   "movement_area_right_hand_m_2", 
+                   "movement_area_left_hand_m_2", 
+                   "movement_area_bias", 
+                   "hand_transition",
+                   "hand_selection_overlap")
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition, levels = c("sham", "ua-tDCS", "bi-tDCS"))
+
+# Verifying the result
+oh_data <- comb_data
+table(oh_data$stimulation_condition)
+head(oh_data)
+```
+```{r}
+oh_permutation_results <- get_perm_f_val_task_parmas(
+  data = oh_data,
+  param_list = oh_behavior_vars,
+  n_perm = N_PERM,
+  print_progress = TRUE
+)
+print(oh_permutation_results)
+```
+
+## Save results 
+```{r}
+# Save omnibus F-test results
+write.csv(apm_permutation_results, file.path(OUTPUT_DIR,"perm_F_results_apm.csv"), row.names = FALSE)
+write.csv(vgr_permutation_results, file.path(OUTPUT_DIR,"perm_F_results_vgr.csv"), row.names = FALSE)
+write.csv(bob_permutation_results, file.path(OUTPUT_DIR,"perm_F_results_bob.csv"), row.names = FALSE)
+write.csv(oh_permutation_results,  file.path(OUTPUT_DIR,"perm_F_results_oh.csv"),  row.names = FALSE)
+```
+
+
+# Post-hoc permutation t-tests 
+
+## Perm pair-wise t-tests function
+```{r}
+# ============================================================================
+# POST-HOC PERMUTATION T-TESTS FUNCTIONS
+# ============================================================================
+
+# Function to perform pairwise permutation t-tests with correction
+perform_pairwise_tests <- function(
+  task_df,
+  task_params,
+  n_perm = 5000,
+  correction_method = "bonferroni"
+) {
+  # NO seeding here - relies on parent function setting RNG state
+  
+  subject_col <- "subject"
+  condition_col <- "stimulation_condition"
+
+  # Comparisons (order matters for reporting)
+  comparisons <- list(
+    c("ua-tDCS", "sham"),
+    c("bi-tDCS", "sham"),
+    c("bi-tDCS", "ua-tDCS")
+  )
+
+  # Container for all parameters
+  results_df <- data.frame(
+    parameter = character(),
+    comparison = character(),
+    n_pairs = integer(),
+    statistic = numeric(),
+    p_value = numeric(),
+    p_corrected = numeric(),
+    cohens_d = numeric(),
+    significance = character(),
+    stringsAsFactors = FALSE
+  )
+
+  for (param in task_params) {
+    
+    # Collect this parameter's three pairwise tests
+    param_results <- data.frame(
+      parameter = character(),
+      comparison = character(),
+      n_pairs = integer(),
+      statistic = numeric(),
+      p_value = numeric(),
+      cohens_d = numeric(),
+      stringsAsFactors = FALSE
+    )
+
+    for (comp in comparisons) {
+      cond1 <- comp[1]
+      cond2 <- comp[2]
+
+      # 1) Subset to the two conditions + subject + current param
+      sub_df <- task_df[task_df[[condition_col]] %in% c(cond1, cond2),
+                        c(subject_col, condition_col, param)]
+      names(sub_df) <- c(subject_col, condition_col, "y")
+
+      # 2) Wide by condition to align pairs by subject
+      wide <- tidyr::pivot_wider(
+        sub_df,
+        id_cols = tidyselect::all_of(subject_col),
+        names_from = tidyselect::all_of(condition_col),
+        values_from = "y"
+      )
+
+      # Keep only rows where both conditions are present (paired)
+      if (!all(c(cond1, cond2) %in% names(wide))) {
+        data1 <- numeric(0)
+        data2 <- numeric(0)
+      } else {
+        wide <- wide[stats::complete.cases(wide[, c(cond1, cond2), drop = FALSE]), , drop = FALSE]
+        data1 <- wide[[cond1]]
+        data2 <- wide[[cond2]]
+      }
+
+      # If too few pairs, store NA row
+      if (length(data1) < 2L) {
+        param_results <- rbind(param_results,
+          data.frame(
+            parameter = param,
+            comparison = paste(cond1, "vs", cond2),
+            n_pairs = length(data1),
+            statistic = NA_real_,
+            p_value = NA_real_,
+            cohens_d = NA_real_,
+            stringsAsFactors = FALSE
+          )
+        )
+        next
+      }
+
+      # 3) Permutation paired t-test (uses current RNG state)
+      perm_test <- perm.t.test(data1, data2, paired = TRUE, R = n_perm)
+
+      # 4) Cohen's d for paired data
+      dvals <- data1 - data2
+      cohens_d_val <- mean(dvals, na.rm = TRUE) / stats::sd(dvals, na.rm = TRUE)
+
+      # 5) Collect results
+      param_results <- rbind(param_results,
+        data.frame(
+          parameter = param,
+          comparison = paste(cond1, "vs", cond2),
+          n_pairs = length(dvals),
+          statistic = unname(perm_test$statistic),
+          p_value = unname(perm_test$p.value),
+          cohens_d = cohens_d_val,
+          stringsAsFactors = FALSE
+        )
+      )
+    }
+
+    # 6) Multiple-comparison correction within this parameter (across its 3 tests)
+    param_results$p_corrected <- stats::p.adjust(param_results$p_value, method = correction_method)
+
+    # 7) Significance marks (prioritize corrected p; then fallback to raw p and trend)
+    param_results$significance <- ifelse(!is.na(param_results$p_corrected) & param_results$p_corrected < 0.05, "**",
+                                  ifelse(!is.na(param_results$p_value)     & param_results$p_value     < 0.05, "*",
+                                  ifelse(!is.na(param_results$p_value)     & param_results$p_value     < 0.10, ".", "")))
+
+    # 8) Append to all results
+    results_df <- rbind(results_df,
+                        param_results[, c("parameter","comparison","n_pairs","statistic","p_value","p_corrected","cohens_d","significance")])
+  }
+
+  # Significant-only view
+  sig_results <- subset(results_df, significance %in% c(".", "*", "**"))
+
+  list(
+    all_results = results_df,
+    significant_results = sig_results
+  )
+}
+
+
+# Post-hoc permutation t-tests (paired) for significant F-tests
+run_posthoc_permutation <- function(
+  f_results_df,
+  task_df,
+  alpha = 0.05,
+  n_perm = 5000,
+  seed = 123,
+  correction_method = "bonferroni"
+) {
+  
+  base_seed <- seed
+  subject_col   <- "subject"
+  condition_col <- "stimulation_condition"
+
+  # Which parameters are significant at the omnibus level
+  sig_params <- f_results_df$parameter[f_results_df$p_value < alpha]###############################
+  sig_params <- f_results_df$parameter
+  if (length(sig_params) == 0L) {
+    message("No parameters passed the F-test threshold; nothing to run post-hoc on.")
+    return(list(all = data.frame(), by_param = list()))
+  }
+
+  all_posthoc <- list()
+
+  for (i in seq_along(sig_params)) {
+    param <- sig_params[i]
+    
+    # Set seed ONCE for this parameter (covers all 3 comparisons)
+    if (!is.null(base_seed)) {
+      set.seed(base_seed + i - 1)
+    }
+    
+    # Use all data (no outlier removal)
+    filtered_df <- task_df
+
+    # Run the paired permutation post-hoc comparisons for THIS param only
+    ph <- perform_pairwise_tests(
+      task_df = filtered_df,
+      task_params = param, 
+      n_perm = n_perm,
+      correction_method = correction_method
+    )
+
+    all_posthoc[[param]] <- ph$all_results
+  }
+
+  combined <- do.call(rbind, all_posthoc)
+
+  # Return both a combined df and split-by-parameter list
+  list(
+    all = combined[order(combined$parameter, combined$comparison), ],
+    by_param = all_posthoc
+  )
+}
+```
+
+## APM
+
+```{r}
+apm_posthoc <- run_posthoc_permutation(
+  f_results_df = apm_permutation_results,
+  task_df = apm_wide,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+apm_posthoc$all
+```
+
+## VGR
+```{r}
+vgr_posthoc <- run_posthoc_permutation(
+  f_results_df = vgr_permutation_results,
+  task_df = vgr_wide,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "fdr"  
+)
+vgr_posthoc$all
+```
+
+## BOB
+```{r}
+bob_posthoc <- run_posthoc_permutation(
+  f_results_df = bob_permutation_results,
+  task_df = bob_data,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+bob_posthoc$all
+```
+
+## OH 
+```{r}
+oh_posthoc <- run_posthoc_permutation(
+  f_results_df = oh_permutation_results,
+  task_df = oh_data,
+  alpha = 0.05,
+  n_perm = N_PERM,
+  seed = 123,     
+  correction_method = "bonferroni"  
+)
+oh_posthoc$all
+```
+
+
+## Save Results 
+```{r}
+# Save posthoc test results
+write.csv(apm_posthoc$all, file.path(OUTPUT_DIR,"perm_posthoc_apm.csv"), row.names = FALSE)
+write.csv(vgr_posthoc$all, file.path(OUTPUT_DIR,"perm_posthoc_vgr.csv"), row.names = FALSE)
+write.csv(bob_posthoc$all, file.path(OUTPUT_DIR,"perm_posthoc_bob.csv"), row.names = FALSE)
+write.csv(oh_posthoc$all,  file.path(OUTPUT_DIR,"perm_posthoc_oh.csv"),  row.names = FALSE)
+```
+
+
+## Load perm results 
+```{r}
+# --- Load saved results (no permutations run) ---
+# Omnibus F-tests
+apm_permutation_results <- read.csv(file.path(OUTPUT_DIR,"perm_F_results_apm.csv"), check.names = FALSE)
+vgr_permutation_results <- read.csv(file.path(OUTPUT_DIR,"perm_F_results_vgr.csv"), check.names = FALSE)
+bob_permutation_results <- read.csv(file.path(OUTPUT_DIR,"perm_F_results_bob.csv"), check.names = FALSE)
+oh_permutation_results  <- read.csv(file.path(OUTPUT_DIR,"perm_F_results_oh.csv"),  check.names = FALSE)
+
+# Posthoc results (wrap into the same structure your plotting fn expects)
+apm_posthoc <- list(all = read.csv(file.path(OUTPUT_DIR,"perm_posthoc_apm.csv"), check.names = FALSE))
+#vgr_posthoc <- list(all = read.csv(file.path(OUTPUT_DIR,"perm_posthoc_vgr.csv"), check.names = FALSE))
+bob_posthoc <- list(all = read.csv(file.path(OUTPUT_DIR,"perm_posthoc_bob.csv"), check.names = FALSE))
+#oh_posthoc  <- list(all = read.csv(file.path(OUTPUT_DIR,"perm_posthoc_oh.csv"),  check.names = FALSE))
+
+# (Optional but helpful) ensure character columns are characters, not factors
+for (dfn in c("apm_permutation_results","vgr_permutation_results",
+              "bob_permutation_results","oh_permutation_results")) {
+  tmp <- get(dfn)
+  char_like <- c("parameter","significance","subjects_removed")
+  for (cc in intersect(char_like, names(tmp))) tmp[[cc]] <- as.character(tmp[[cc]])
+  assign(dfn, tmp)
+}
+for (lst in c("apm_posthoc","bob_posthoc")) {
+  tmp <- get(lst)$all
+  char_like <- c("parameter","comparison","significance","subjects_removed")
+  for (cc in intersect(char_like, names(tmp))) tmp[[cc]] <- as.character(tmp[[cc]])
+  assign(lst, list(all = tmp))
+}
+
+```
+
+
+# Plots 
+
+```{r, fig.width=5, fig.height=6}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+plot_behavioral_parameter_with_stats <- function(data, parameter, perm_results = NULL, 
+                                                posthoc_results = NULL, save_plot = TRUE, 
+                                                output_dir = PLOTS_OUTPUT_DIR, 
+                                                width = 5, height = 7, dpi = 400) {
+  
+  # Create output directory if it doesn't exist
+  if (save_plot && !dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Define colors for stimulation conditions (mapped to clean labels)
+  condition_colors <- c("Unilateral" = "#e3d54a", "Bilateral" = "#da4f33", "Sham" = "#66a6ba")
+  
+  # Prepare data for plotting
+  plot_data <- data %>%
+    dplyr::select(subject, stimulation_condition, all_of(parameter)) %>%
+    dplyr::filter(!is.na(.data[[parameter]])) %>%  # Only remove missing values
+    dplyr::mutate(
+      stimulation_condition = factor(stimulation_condition, 
+                                   levels = c("sham", "ua-tDCS", "bi-tDCS"),
+                                   labels = c("Sham", "Unilateral", "Bilateral"))
+    )
+  
+  # Check if data exists for the parameter
+  if (nrow(plot_data) == 0) {
+    warning(paste("No data available for parameter:", parameter))
+    return(NULL)
+  }
+  
+  # Create clean parameter name for title
+  param_title <- gsub("_", " ", parameter)
+  param_title <- tools::toTitleCase(param_title)
+  
+  cat(paste0("Parameter: ", parameter, "\n"))
+  cat(paste0("Number of observations: ", nrow(plot_data), "\n"))
+  cat(paste0("Number of subjects: ", dplyr::n_distinct(plot_data$subject), "\n\n"))
+  
+  # Create the base plot
+  p <- ggplot(plot_data, aes(x = stimulation_condition, y = .data[[parameter]])) +
+    geom_boxplot(aes(fill = stimulation_condition), alpha = 0.7, outlier.shape = NA, width = 0.6) +
+    geom_point(
+      aes(fill = stimulation_condition),
+      position = position_jitterdodge(dodge.width = 0.8, jitter.width = 0.2),
+      shape = 21,
+      size = 3,
+      alpha = 0.8,
+      stroke = 1.5,
+      color = "black",
+      show.legend = FALSE
+    ) +
+    scale_fill_manual(values = condition_colors) +
+    labs(
+      title = "",
+      x = "",
+      y = "",
+      fill = "Condition"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", size = 20),
+      plot.subtitle = element_text(size = 20),
+      axis.text = element_text(size = 16),
+      axis.title = element_text(size = 18),
+      legend.title = element_text(face = "bold", size = 18),
+      axis.title.y = element_text(margin = margin(r = 15)),
+      legend.text = element_text(size = 16),    
+      strip.text = element_text(face = "bold", size = 18), 
+      panel.grid.major.x = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      axis.line = element_line(color = "black", size = 0.5),
+      panel.border = element_blank()
+    )
+  
+  if (save_plot) {
+    filename <- file.path(output_dir, paste0(parameter, "_boxplot.png"))
+    ggsave(filename, plot = p, width = width, height = height, dpi = dpi, bg = "white")
+    cat("Plot saved as:", filename, "\n\n")
+  }
+  
+  print(p)
+  return(p)
+}
+```
+
+
+
+```{r, fig.width=5, fig.height=7, fig.dpi=400}
+# APM parameter: LH_variability_x_m
+LH_variability_x_m_plot <- plot_behavioral_parameter_with_stats(apm_wide, "LH_variability_x_m", 
+                                    perm_results = apm_permutation_results,
+                                    posthoc_results = apm_posthoc)
+
+# BOB parameter: x2_bar_length_variability  
+x2_bar_length_variability_plot <- plot_behavioral_parameter_with_stats(bob_data, "x2_bar_length_variability", 
+                                    perm_results = bob_permutation_results,
+                                    posthoc_results = bob_posthoc)
+```
+
+
+
+# Learnig effects (NONE)
+
+```{r}
+# ============================================================================
+# LEARNING EFFECT ANALYSIS (Session Number)
+# ============================================================================
+
+## Learning effect analysis function (corrected)
+analyze_learning_effect <- function(data, param_list, print_progress = TRUE) {
+  # Fixed columns
+  subject_col <- "subject"
+  session_col <- "session_no"
+  
+  # Ensure session_no is ordered factor
+  if (!session_col %in% names(data)) {
+    stop(paste("Column", session_col, "not found in data"))
+  }
+  
+  data[[session_col]] <- ordered(data[[session_col]], levels = c(1, 2, 3))
+  
+  results_df <- data.frame(
+    parameter = character(),
+    f_statistic = numeric(),
+    df_num = numeric(),
+    df_denom = numeric(),
+    p_value = numeric(),
+    n_obs = integer(),
+    n_subjects = integer(),
+    singular_fit = logical(),
+    significance = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (param in param_list) {
+    if (print_progress) {
+      cat("##########################\n")
+      cat("Learning Effect Analysis for:", param, "\n")
+    }
+    
+    # Formula: y ~ session_no + (1|subject)
+    formula <- as.formula(sprintf("%s ~ %s + (1|%s)", param, session_col, subject_col))
+    if (print_progress) cat("Formula:", deparse(formula), "\n")
+    
+    # Select data for this parameter (no outlier removal)
+    model_df <- data %>%
+      dplyr::select(dplyr::all_of(c(subject_col, session_col, param))) %>%
+      dplyr::filter(!is.na(.data[[param]]))
+    
+    n_obs <- nrow(model_df)
+    n_subjects <- dplyr::n_distinct(model_df[[subject_col]])
+    
+    if (print_progress) {
+      cat("Total observations:", n_obs, "\n")
+      cat("Number of subjects:", n_subjects, "\n")
+    }
+    
+    # Check if enough data
+    if (n_obs == 0 || n_subjects < 2) {
+      if (print_progress) cat("Not enough data. Skipping", param, "\n\n")
+      results_df <- rbind(
+        results_df,
+        data.frame(
+          parameter = param,
+          f_statistic = NA_real_,
+          df_num = NA_real_,
+          df_denom = NA_real_,
+          p_value = NA_real_,
+          n_obs = n_obs,
+          n_subjects = n_subjects,
+          singular_fit = NA,
+          significance = "ns",
+          stringsAsFactors = FALSE
+        )
+      )
+      next
+    }
+    
+    # Fit model and check for singularity
+    singular_fit <- FALSE
+    model_fit <- tryCatch({
+      withCallingHandlers(
+        lme4::lmer(formula, data = model_df, REML = FALSE),
+        warning = function(w) {
+          if (grepl("singular", w$message, ignore.case = TRUE)) {
+            singular_fit <<- TRUE
+          }
+        }
+      )
+    }, error = function(e) {
+      if (print_progress) cat("Error fitting model:", e$message, "\n\n")
+      return(NULL)
+    })
+    
+    if (is.null(model_fit)) {
+      results_df <- rbind(
+        results_df,
+        data.frame(
+          parameter = param,
+          f_statistic = NA_real_,
+          df_num = NA_real_,
+          df_denom = NA_real_,
+          p_value = NA_real_,
+          n_obs = n_obs,
+          n_subjects = n_subjects,
+          singular_fit = NA,
+          significance = "ns",
+          stringsAsFactors = FALSE
+        )
+      )
+      next
+    }
+    
+    # Get ANOVA results using lmerTest
+    anova_result <- tryCatch({
+      anova(model_fit)
+    }, error = function(e) {
+      if (print_progress) cat("Error in ANOVA:", e$message, "\n\n")
+      return(NULL)
+    })
+    
+    if (is.null(anova_result)) {
+      results_df <- rbind(
+        results_df,
+        data.frame(
+          parameter = param,
+          f_statistic = NA_real_,
+          df_num = NA_real_,
+          df_denom = NA_real_,
+          p_value = NA_real_,
+          n_obs = n_obs,
+          n_subjects = n_subjects,
+          singular_fit = singular_fit,
+          significance = "ns",
+          stringsAsFactors = FALSE
+        )
+      )
+      next
+    }
+    
+    # Extract statistics safely
+    f_stat <- if("F value" %in% names(anova_result)) anova_result$`F value`[1] else NA_real_
+    p_val <- if("Pr(>F)" %in% names(anova_result)) anova_result$`Pr(>F)`[1] else NA_real_
+    df_num <- if("NumDF" %in% names(anova_result)) anova_result$NumDF[1] else 
+              if("npar" %in% names(anova_result)) anova_result$npar[1] else NA_real_
+    df_denom <- if("DenDF" %in% names(anova_result)) anova_result$DenDF[1] else NA_real_
+    
+    sig_level <- ifelse(is.na(p_val), "ns",
+                 ifelse(p_val < 0.001, "***",
+                 ifelse(p_val < 0.01,  "**",
+                 ifelse(p_val < 0.05,  "*", "ns"))))
+    
+    results_df <- rbind(
+      results_df,
+      data.frame(
+        parameter = param,
+        f_statistic = f_stat,
+        df_num = df_num,
+        df_denom = df_denom,
+        p_value = p_val,
+        n_obs = n_obs,
+        n_subjects = n_subjects,
+        singular_fit = singular_fit,
+        significance = sig_level,
+        stringsAsFactors = FALSE
+      )
+    )
+    
+    if (print_progress) {
+      cat("Singular fit:", singular_fit, "\n")
+      cat("F-statistic:", f_stat, "\n")
+      cat("df:", df_num, ",", df_denom, "\n")
+      cat("p-value:", p_val, "\n")
+      cat("Significance:", sig_level, "\n\n")
+    }
+  }
+  
+  results_df
+}
+```
+
+
+```{r}
+# ============================================================================
+# RUN LEARNING EFFECT ANALYSIS FOR ALL TASKS AND SAVE RESULTS
+# ============================================================================
+
+## Run learning effect analysis for all tasks
+
+cat("\n============================================================\n")
+cat("LEARNING EFFECT ANALYSIS: APM\n")
+cat("============================================================\n")
+apm_learning_results <- analyze_learning_effect(
+  data = apm_wide,
+  param_list = apm_behavior_vars_both_hands,
+  print_progress = FALSE
+)
+
+cat("\n============================================================\n")
+cat("LEARNING EFFECT ANALYSIS: VGR\n")
+cat("============================================================\n")
+vgr_learning_results <- analyze_learning_effect(
+  data = vgr_wide,
+  param_list = vgr_behavior_vars_both_hands,
+  print_progress = FALSE
+)
+
+cat("\n============================================================\n")
+cat("LEARNING EFFECT ANALYSIS: BOB\n")
+cat("============================================================\n")
+bob_learning_results <- analyze_learning_effect(
+  data = bob_data,
+  param_list = bob_behavior_vars,
+  print_progress = FALSE
+)
+
+cat("\n============================================================\n")
+cat("LEARNING EFFECT ANALYSIS: OH\n")
+cat("============================================================\n")
+oh_learning_results <- analyze_learning_effect(
+  data = oh_data,
+  param_list = oh_behavior_vars,
+  print_progress = FALSE
+)
+
+## Combine all learning effect results
+all_learning_results <- rbind(
+  apm_learning_results %>% mutate(task = "APM"),
+  vgr_learning_results %>% mutate(task = "VGR"),
+  bob_learning_results %>% mutate(task = "BOB"),
+  oh_learning_results %>% mutate(task = "OH")
+)
+
+## Display significant results only
+cat("\n============================================================\n")
+cat("PARAMETERS SHOWING LEARNING EFFECTS (p < 0.05)\n")
+cat("============================================================\n")
+
+sig_results <- all_learning_results %>% 
+  filter(significance %in% c("*", "**", "***")) %>%
+  arrange(task, p_value) %>%
+  select(task, parameter, f_statistic, p_value, n_obs, significance)
+
+if (nrow(sig_results) > 0) {
+  print(sig_results, digits = 4)
+  cat("\nTotal significant learning effects:", nrow(sig_results), "\n")
+} else {
+  cat("\nNo significant learning effects found.\n")
+}
+
+## Save results
+write.csv(all_learning_results, 
+          file.path(OUTPUT_DIR, "learning_effect_all_tasks.csv"), 
+          row.names = FALSE)
+```
+
+
+
+

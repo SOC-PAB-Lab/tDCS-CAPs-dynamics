@@ -1,0 +1,169 @@
+---
+title: "Combined Sham and Bilateral Correlations"
+output:
+  html_document:
+    df_print: paged
+date: "2025-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(results = "asis")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This notebook plots significant sham (Spearman) and bilateral (partial Spearman) brain–behavior correlations side by side.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(forcats)
+library(ggh4x)
+library(dotenv)
+```
+
+## Global params
+
+```{r}
+load_dot_env(file = "../.env")
+RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
+
+INPUT_DIR        <- file.path(RESULTS_DIR, "stats", "03_caps_beh")
+PLOTS_OUTPUT_DIR <- file.path(RESULTS_DIR, "main_figures", "06_caps_beh")
+dir.create(PLOTS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load data
+
+```{r}
+sham_corr_all     <- read.csv(file.path(INPUT_DIR, "sham_correlations_data.csv"),       stringsAsFactors = FALSE)
+bilateral_corr_all <- read.csv(file.path(INPUT_DIR, "bilateral_partial_corr_data.csv"), stringsAsFactors = FALSE)
+```
+
+# Prepare data
+
+```{r}
+# Sham: filter significant, map metric names
+sham_sig <- sham_corr_all %>%
+  filter(p_value < 0.05) %>%
+  mutate(
+    analysis_type    = "Sham",
+    condition        = "Sham",
+    correlation_type = "Spearman's ρ",
+    metric_clean = case_when(
+      metric == "Occurrence"             ~ "CAP4 OC",
+      metric == "Dwell_Time"             ~ "CAP4 DT",
+      metric == "transition_probability" ~ "CAP1 to CAP7 TP",
+      TRUE ~ metric
+    )
+  )
+
+# Bilateral: filter significant, map metric names
+bilateral_sig <- bilateral_corr_all %>%
+  filter(p_value < 0.05) %>%
+  mutate(
+    analysis_type    = "Bilateral",
+    condition        = "Bilateral",
+    correlation_type = "Partial Spearman's ρ",
+    metric_clean = case_when(
+      metric == "CAP4 Occurrence Rate"              ~ "CAP4 OC",
+      metric == "CAP4 Dwell Time"                   ~ "CAP4 DT",
+      metric == "CAP1->CAP7 Transition Probability" ~ "CAP1 to CAP7 TP",
+      TRUE ~ metric
+    )
+  )
+
+# Standardize columns and filter to OC and TP only
+keep_cols <- c("task", "parameter", "metric_clean", "correlation", "p_value", "n_obs",
+               "analysis_type", "condition", "correlation_type")
+
+sham_filtered     <- sham_sig     %>% select(all_of(keep_cols)) %>% filter(metric_clean %in% c("CAP4 OC", "CAP1 to CAP7 TP"))
+bilateral_filtered <- bilateral_sig %>% select(all_of(keep_cols)) %>% filter(metric_clean %in% c("CAP4 OC", "CAP1 to CAP7 TP"))
+
+cat(sprintf("Sham: %d significant correlations\n",     nrow(sham_filtered)))
+cat(sprintf("Bilateral: %d significant correlations\n", nrow(bilateral_filtered)))
+```
+
+# Plot
+
+```{r}
+prepare_plot_data <- function(data) {
+  data %>%
+    mutate(
+      parameter_clean = case_when(
+        grepl("^LH_", parameter) ~ paste("LH", gsub("_", " ", gsub("^LH_", "", parameter))),
+        grepl("^RH_", parameter) ~ paste("RH", gsub("_", " ", gsub("^RH_", "", parameter))),
+        grepl("^x1_", parameter) ~ paste("Level 1", gsub("_", " ", gsub("^x1_", "", parameter))),
+        grepl("^x2_", parameter) ~ paste("Level 2", gsub("_", " ", gsub("^x2_", "", parameter))),
+        grepl("^x3_", parameter) ~ paste("Level 3", gsub("_", " ", gsub("^x3_", "", parameter))),
+        TRUE ~ gsub("_", " ", parameter)
+      ),
+      parameter_clean = case_when(
+        grepl("m s$",  parameter_clean) ~ gsub(" m s$",  " (m/s)", parameter_clean),
+        grepl("m 2$",  parameter_clean) ~ gsub(" m 2$",  " (m²)",  parameter_clean),
+        grepl(" s$",   parameter_clean) ~ gsub(" s$",    " (s)",   parameter_clean),
+        grepl(" rad$", parameter_clean) ~ gsub(" rad$",  " (rad)", parameter_clean),
+        grepl("x m$",  parameter_clean) ~ gsub(" x m$",  " x (m)", parameter_clean),
+        grepl("y m$",  parameter_clean) ~ gsub(" y m$",  " y (m)", parameter_clean),
+        grepl(" m$",   parameter_clean) ~ gsub(" m$",    " (m)",   parameter_clean),
+        TRUE ~ parameter_clean
+      ),
+      parameter_clean = paste0(toupper(substring(parameter_clean, 1, 1)), substring(parameter_clean, 2)),
+      task        = factor(task,        levels = c("APM", "VGR", "OH", "BOB")),
+      metric_clean = factor(metric_clean, levels = c("CAP4 OC", "CAP1 to CAP7 TP"))
+    )
+}
+
+sham_plot_data      <- prepare_plot_data(sham_filtered)
+bilateral_plot_data <- prepare_plot_data(bilateral_filtered)
+
+condition_colors <- c("Sham" = "#66a6ba", "Bilateral" = "#da4f33")
+
+create_correlation_plot <- function(plot_data, color, correlation_label, filename) {
+  p <- ggplot(plot_data, aes(x = correlation, y = fct_reorder(parameter_clean, parameter_clean))) +
+    geom_vline(xintercept = 0,          color = "gray50", linetype = "dashed", linewidth = 0.6) +
+    geom_vline(xintercept = c(-0.4, 0.4), color = "gray70", linetype = "dotted", linewidth = 0.4) +
+    geom_point(color = color, size = 8, alpha = 1) +
+    ggh4x::facet_nested(task ~ metric_clean, scales = "free_y", space = "free_y") +
+    scale_x_continuous(breaks = c(-0.4, 0, 0.4), labels = c("-0.4", "0", "0.4")) +
+    labs(title = "", subtitle = "", x = correlation_label, y = "") +
+    theme_minimal() +
+    theme(
+      strip.text.x  = element_text(size = 20, face = "bold"),
+      strip.text.y  = element_text(size = 20, face = "bold"),
+      axis.text.x   = element_text(size = 18),
+      axis.text.y   = element_text(size = 18),
+      axis.title.x  = element_text(size = 20),
+      axis.title.y  = element_text(size = 20),
+      strip.background    = element_rect(fill = "grey90", color = "grey60", linewidth = 0.5),
+      panel.border        = element_rect(color = "grey70", fill = NA,       linewidth = 0.5),
+      panel.spacing.y     = unit(0.8, "lines"),
+      panel.spacing.x     = unit(0.5, "lines"),
+      panel.grid.major.y  = element_line(color = "grey90"),
+      panel.grid.major.x  = element_blank(),
+      panel.grid.minor    = element_blank(),
+      ggh4x.facet.nestline = element_line(color = "black", linewidth = 0.5),
+      legend.position     = "none"
+    )
+
+  print(p)
+  ggsave(file.path(PLOTS_OUTPUT_DIR, filename), p, width = 10, height = 6, dpi = 400, bg = "white")
+  return(p)
+}
+
+sham_correlations_plot2 <- create_correlation_plot(
+  sham_plot_data,
+  condition_colors["Sham"],
+  "Spearman's ρ",
+  "sham_correlations_plot2.png"
+)
+
+bilateral_correlations_plot2 <- create_correlation_plot(
+  bilateral_plot_data,
+  condition_colors["Bilateral"],
+  "Partial Spearman's ρ",
+  "bilateral_correlations_plot2.png"
+)
+```

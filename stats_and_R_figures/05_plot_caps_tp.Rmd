@@ -1,0 +1,644 @@
+---
+title: "05 - Plot CAPs Transition Probabilities"
+output: pdf_document
+date: "2025-05-26"
+---
+
+This notebook analyses **CAP-to-CAP transition probabilities** for the tDCS study (Unilateral, Bilateral, Sham sessions, run-ON data, 7-CAP solution, N = 20 subjects).
+
+It has two main sections:
+
+1.  **Transition probability heatmaps** — mean transition probability matrices (from-CAP × to-CAP) are visualised for each session using an Oranges colour scale. Individual per-session heatmaps and a shared colourbar are saved to `main_figures/05_caps_tp`.
+
+2.  **Cohen's d heatmaps** — paired Cohen's d (difference scores: session1 − session2, normalised by the SD of differences) is computed for each CAP pair across three pairwise session comparisons: Unilateral − Sham, Bilateral − Sham, and Bilateral − Unilateral. Results are plotted on a diverging blue–white–red scale (fixed ±0.6) and saved alongside a standalone colourbar. The full results table is saved to `stats/02_caps/cohens_d_transitions.csv`.
+
+A final diagnostic section inspects the CAP7 → CAP6 transition specifically to understand why its Cohen's d may be undefined (zero variance in paired differences, near-zero transitions across all subjects).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(pheatmap)
+library(RColorBrewer)
+library(corrplot)
+library(gridExtra)
+library(reshape2)
+library(dotenv)
+```
+
+```{r}
+# Function to get individual subject matrices of a session for statistical testing
+get_subject_matrices <- function(df, session) {
+  ses_data <- df[df$session == session, ]
+  subjects <- unique(ses_data$subject)
+  
+  # Create a 3D array: subjects x from_CAP x to_CAP
+  subject_matrices <- array(0, dim = c(length(subjects), k, k))
+  
+  for (s_idx in seq_along(subjects)) {
+    subject <- subjects[s_idx]
+    subj_data <- ses_data[ses_data$subject == subject, ]
+    
+    for (i in 1:k) {
+      for (j in 1:k) {
+        if (i != j) {
+          prob_data <- subj_data[subj_data$from_CAP == paste0('CAP', i) & 
+                                subj_data$to_CAP == paste0('CAP', j), ]$transition_probability
+          
+          if (length(prob_data) > 0) {
+            subject_matrices[s_idx, i, j] <- prob_data[1]
+          } else {
+            subject_matrices[s_idx, i, j] <- NA
+          }
+        }
+      }
+    }
+  }
+  
+  return(list(matrices = subject_matrices, subjects = subjects))
+}
+```
+
+```{r}
+# Function to get transition matrix for a session
+get_transition_matrix <- function(df, session) {
+  ses_data <- df[df$session == session, ]
+  matrix_result <- matrix(0, nrow = k, ncol = k)
+  
+  for (i in 1:k) {
+    for (j in 1:k) {
+      if (i != j) {
+        probs <- ses_data[ses_data$from_CAP == paste0('CAP', i) & 
+                         ses_data$to_CAP == paste0('CAP', j), ]$transition_probability
+        
+        if (length(probs) > 0) {
+          matrix_result[i, j] <- mean(probs, na.rm = TRUE)
+        }
+      } else {
+        matrix_result[i, j] <- NA  # Diagonal elements set to NA
+      }
+    }
+  }
+  
+  return(matrix_result)
+}
+```
+
+# GLobal params
+
+Dirs
+
+```{r}
+load_dot_env(file = "../.env")
+
+BASE_DIR    <- Sys.getenv("BASE_DIR")
+RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
+
+INPUT_DIR        <- file.path(BASE_DIR)
+PLOTS_OUTPUT_DIR <- file.path(RESULTS_DIR, "main_figures", "05_caps_tp")
+STATS_OUTPUT_DIR <- file.path(RESULTS_DIR, "stats", "02_caps")
+
+dir.create(PLOTS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(STATS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+# Set parameters
+k <- 7
+subs <- c('Y01', 'Y02', 'Y03', 'Y04', 'Y05', 'Y06', 'Y07', 'Y08', 'Y09', 'Y10',
+          'Y11', 'Y12', 'Y13', 'Y14', 'Y15', 'Y16', 'Y17', 'Y18', 'Y19', 'Y20')
+sessions <- c(1, 2, 3)
+sessions_dict <- c("1" = "Unilateral", "2" = "Bilateral", "3" = "Sham")
+runs <- c(2)
+runs_dict <- c("2" = "tDCS On")
+runs_str <- "run-ON"
+
+transition_df <- read_csv(file.path(INPUT_DIR, "caps_dynamics_run-ON", 
+                                "caps_nclust-7", "CAP_transitions_full.csv"))
+
+```
+
+# Transition probs heatmaps
+
+```{r, fig.height=5, fig.width=17}
+# Modified create_heatmap function to control colorbar display
+create_heatmap <- function(matrix_data, title, vmin, vmax, show_colorbar = TRUE) {
+  # Convert matrix to long format for ggplot
+  matrix_df <- expand.grid(From = 1:k, To = 1:k)
+  matrix_df$Value <- as.vector(matrix_data)
+  matrix_df$From <- factor(paste0("CAP", matrix_df$From))
+  matrix_df$To <- factor(paste0("CAP", matrix_df$To))
+  
+  # Remove diagonal elements
+  matrix_df <- matrix_df[matrix_df$From != matrix_df$To, ]
+  
+  p <- ggplot(matrix_df, aes(x = To, y = From, fill = Value)) +
+    geom_tile(size = 0.8) +
+    scale_fill_distiller(name = "Transition\nProbability\n", 
+                         palette = "Oranges",
+                         direction = 1,
+                         limits = c(vmin, vmax),
+                         na.value = "grey90",
+                         guide = guide_colorbar(barwidth = 2, 
+                                              barheight = 16,
+                                              title.position = "top",
+                                              title.hjust = 0.8,
+                                              label.theme = element_text(size = 14),
+                                              title.theme = element_text(size = 16, hjust = 0.5))) +
+    geom_text(aes(label = sprintf("%.2f", Value)), 
+              size = 18, 
+              angle = -45,
+              color = "black") +
+    labs(x = "",
+         y = "") +
+    scale_y_discrete(limits = rev(levels(matrix_df$From))) +  # Reverse y-axis to put CAP1 at top
+    theme_minimal() +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+          axis.title = element_text(size = 24),
+          legend.title = element_text(size = 16, face = "bold"),
+          legend.text = element_text(size = 14), 
+          panel.border = element_rect(color = "black", fill = "NA", size = 4))
+  
+  # Control colorbar display
+  if (!show_colorbar) {
+    p <- p + guides(fill = "none")
+  }
+  
+  return(p)
+}
+
+
+all_values <- c()
+for (ses_key in sessions) {
+  trans_matrix <- get_transition_matrix(transition_df, ses_key)
+  all_values <- c(all_values, as.vector(trans_matrix))
+}
+
+# Remove NA values and calculate min/max
+all_values <- all_values[!is.na(all_values)]
+vmin <- min(all_values)
+vmax <- max(all_values)
+
+vmin <- 0
+vmax <- 0.5
+
+cat(sprintf("Global min transition probability: %.3f\n", vmin))
+cat(sprintf("Global max transition probability: %.3f\n", vmax))
+
+
+# Create heatmaps for each condition
+heatmap_plots <- list()
+for (idx in seq_along(sessions)) {
+  ses_key <- sessions[idx]
+  ses_name <- sessions_dict[as.character(ses_key)]
+  
+  cat(sprintf("\nProcessing %s session...\n", ses_name))
+  
+  # Get transition matrix
+  trans_matrix <- get_transition_matrix(transition_df, ses_key)
+  
+  # Create heatmap with colorbar (we'll extract and remove it later)
+  p <- create_heatmap(trans_matrix, paste(ses_name, "tDCS"), vmin, vmax, TRUE)
+  heatmap_plots[[idx]] <- p
+  
+  # Print summary statistics
+  cat(sprintf("  Mean transition probability: %.3f\n", mean(trans_matrix, na.rm = TRUE)))
+  cat(sprintf("  Max transition probability: %.3f\n", max(trans_matrix, na.rm = TRUE)))
+  cat(sprintf("  Min transition probability (excl. diagonal): %.3f\n", min(trans_matrix, na.rm = TRUE)))
+}
+
+# Load required library for better plot arrangement
+library(cowplot)
+
+# Extract the legend from the last plot
+legend <- get_legend(heatmap_plots[[length(sessions)]])
+
+# Remove legend from all plots
+plots_no_legend <- lapply(heatmap_plots, function(p) p + guides(fill = "none"))
+
+# Combine plots without legends
+plots_combined <- plot_grid(plotlist = plots_no_legend, ncol = 3, align = "hv")
+
+# Add the single legend to the right with more space
+combined_plot <- plot_grid(plots_combined, legend, ncol = 2, rel_widths = c(1, 0.15))
+
+# Save the combined plot with larger dimensions
+ggsave(file.path(PLOTS_OUTPUT_DIR, 'TP_raw_heatmaps_all_sessions.png'), 
+       combined_plot, width = 17, height = 5, dpi = 400)
+
+print(combined_plot)
+
+# =============================================
+# NEW CODE: Print and save individual heatmaps
+# =============================================
+
+cat("\n\nCreating individual heatmaps...\n")
+
+# Print and save each heatmap individually (without colorbar)
+for (idx in seq_along(sessions)) {
+  ses_key <- sessions[idx]
+  ses_name <- sessions_dict[as.character(ses_key)]
+  
+  cat(sprintf("Creating individual heatmap for %s session...\n", ses_name))
+  
+  # Create individual heatmap WITHOUT colorbar
+  individual_plot <- heatmap_plots[[idx]] + guides(fill = "none")
+  
+  # Generate filename for individual plot
+  individual_filename_png <- file.path(PLOTS_OUTPUT_DIR, paste0('TP_raw_heatmap_', 
+                                                       tolower(ses_name), 
+                                                       '.png'))
+  
+  # Save individual plot
+  ggsave(individual_filename_png, individual_plot, width = 12, height = 12, dpi = 400)
+  
+  cat(sprintf("  Saved individual heatmap to: %s\n", individual_filename_png))
+  
+  # Print individual plot to console/viewer
+  print(individual_plot)
+}
+
+# =============================================
+# Create separate colorbar with large text
+# =============================================
+
+cat("\nCreating separate colorbar...\n")
+
+# Create a proper standalone colorbar plot
+colorbar_data <- data.frame(
+  x = 1,
+  y = seq(vmin, vmax, length.out = 100),
+  fill = seq(vmin, vmax, length.out = 100)
+)
+
+colorbar_plot <- ggplot(colorbar_data, aes(x = x, y = y, fill = fill)) +
+  geom_tile() +
+  scale_fill_distiller(name = "", 
+                       palette = "Oranges",
+                       direction = 1,
+                       limits = c(vmin, vmax),
+                       breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+                       guide = guide_colorbar(barwidth = 25, 
+                                            barheight = 3)) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 45, face = "bold"),
+        legend.text = element_text(size = 40),
+        legend.margin = margin(t = 20, b = 20),
+        plot.margin = margin(t = 20, b = 20, l = 20, r = 20)) +
+  coord_fixed(ratio = 0.02) +
+  guides(fill = guide_colorbar(title.position = "top",
+                               raw.ulim= TRUE,
+                               title.hjust = 0.5,
+                               barwidth = 35,
+                               barheight = 3))
+
+# Save the colorbar
+colorbar_filename_png <- file.path(PLOTS_OUTPUT_DIR, 'TP_raw_heatmaps_colorbar.png')
+
+ggsave(colorbar_filename_png, colorbar_plot, width = 15, height = 5, dpi = 400)
+
+cat(sprintf("Saved colorbar to: %s\n", colorbar_filename_png))
+
+# Print colorbar
+print(colorbar_plot)
+
+cat("\nAll individual heatmaps and colorbar have been created and saved.\n")
+```
+
+# Cohens d plots of transition analysis
+
+```{r helper_functions}
+# Compute paired Cohen's d 
+compute_cohens_d_paired <- function(data1, data2) {
+  if (length(data1) < 2 || length(data2) < 2) {
+    return(list(cohens_d = NA, mean_diff = NA, n_pairs = length(data1)))
+  }
+  dvals <- data1 - data2
+  cohens_d_val <- mean(dvals, na.rm = TRUE) / stats::sd(dvals, na.rm = TRUE)
+  mean_diff    <- mean(dvals, na.rm = TRUE)
+  return(list(cohens_d = cohens_d_val, mean_diff = mean_diff, n_pairs = length(dvals)))
+}
+```
+
+```{r perform_analysis}
+# Compute Cohen's d for each CAP-pair transition across pairwise session comparisons
+
+cat("=== COHEN'S D ANALYSIS ===\n")
+
+# Convert to wide format (each CAP pair as a column)
+tp_wide <- transition_df %>%
+  mutate(CAP_pair = paste0(from_CAP, "_", to_CAP)) %>%
+  pivot_wider(
+    id_cols = c(subject, session),
+    names_from = CAP_pair,
+    values_from = transition_probability,
+    values_fill = NA
+  )
+
+# Get all CAP pair column names
+cap_pair_cols <- grep("^CAP[0-9]+_CAP[0-9]+$", names(tp_wide), value = TRUE)
+
+cat(sprintf("Total CAP-to-CAP transitions found: %d\n", length(cap_pair_cols)))
+cat(sprintf("Expected transitions (7x6): %d\n\n", 42))
+
+# Define comparisons
+comparisons <- list(
+  list(
+    title = "Unilateral - Sham",
+    name = "unilateral",
+    session1 = 1,
+    session2 = 3
+  ),
+  list(
+    title = "Bilateral - Sham",
+    name = "bilateral",
+    session1 = 2,
+    session2 = 3
+  ),
+  list(
+    title = "Bilateral - Unilateral",
+    name = "bilateral_vs_unilateral",
+    session1 = 2,
+    session2 = 1
+  )
+)
+
+all_test_results <- data.frame()
+
+for (comp_idx in seq_along(comparisons)) {
+  comp <- comparisons[[comp_idx]]
+
+  cat(sprintf("Processing %s...\n", comp$title))
+
+  cohens_d_matrix <- matrix(NA, nrow = k, ncol = k)
+  effect_sizes    <- matrix(NA, nrow = k, ncol = k)
+
+  n_calculated <- 0
+  n_skipped    <- 0
+
+  for (cap_pair in cap_pair_cols) {
+    parts    <- strsplit(cap_pair, "_")[[1]]
+    from_idx <- as.integer(gsub("CAP", "", parts[1]))
+    to_idx   <- as.integer(gsub("CAP", "", parts[2]))
+
+    session1_data <- tp_wide %>%
+      filter(session == comp$session1) %>%
+      select(subject, all_of(cap_pair))
+
+    session2_data <- tp_wide %>%
+      filter(session == comp$session2) %>%
+      select(subject, all_of(cap_pair))
+
+    paired_data <- inner_join(session1_data, session2_data, by = "subject", suffix = c("_1", "_2"))
+
+    data1 <- paired_data[[paste0(cap_pair, "_1")]]
+    data2 <- paired_data[[paste0(cap_pair, "_2")]]
+
+    valid_mask  <- !is.na(data1) & !is.na(data2)
+    data1_final <- data1[valid_mask]
+    data2_final <- data2[valid_mask]
+
+    if (length(data1_final) < 3) {
+      n_skipped <- n_skipped + 1
+      next
+    }
+
+    # Skip if all values are zero (no transitions occur)
+    if (max(c(data1_final, data2_final)) < 0.001) {
+      n_skipped <- n_skipped + 1
+      next
+    }
+
+    result <- compute_cohens_d_paired(data1_final, data2_final)
+
+    effect_sizes[from_idx, to_idx]    <- result$mean_diff
+    cohens_d_matrix[from_idx, to_idx] <- result$cohens_d
+
+    result_row <- data.frame(
+      Comparison      = comp$title,
+      Transition      = paste0("CAP", from_idx, " -> CAP", to_idx),
+      Mean_Difference = result$mean_diff,
+      Cohens_d        = result$cohens_d,
+      n_pairs         = result$n_pairs,
+      stringsAsFactors = FALSE
+    )
+    all_test_results <- rbind(all_test_results, result_row)
+
+    n_calculated <- n_calculated + 1
+  }
+
+  cat(sprintf("  Successfully calculated: %d transitions\n", n_calculated))
+  cat(sprintf("  Skipped: %d transitions\n\n", n_skipped))
+
+  comparisons[[comp_idx]]$cohens_d    <- cohens_d_matrix
+  comparisons[[comp_idx]]$effect_sizes <- effect_sizes
+}
+
+write.csv(all_test_results,
+          file.path(STATS_OUTPUT_DIR, "cohens_d_transitions.csv"),
+          row.names = FALSE)
+cat(sprintf("Saved Cohen's d results to: %s\n",
+            file.path(STATS_OUTPUT_DIR, "cohens_d_transitions.csv")))
+```
+
+```{r plotting_functions}
+# Function to determine text color based on background intensity
+get_text_color <- function(fill_value, max_abs_value) {
+  normalized_value <- fill_value / max_abs_value
+  intensity <- abs(normalized_value)
+  
+  if (intensity > 0.6) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Function to create Cohen's d heatmap
+create_cohens_d_heatmap <- function(comp, show_colorbar = TRUE) {
+  cohens_d_matrix <- comp$cohens_d
+  
+  # Create annotation matrix
+  annot_matrix <- matrix("", nrow = k, ncol = k)
+  text_color_matrix <- matrix("black", nrow = k, ncol = k)
+  
+  # Calculate max absolute Cohen's d for consistent scale
+  max_cohens_d <- 0.6  # Fixed scale as in your original code
+  
+  for (i in 1:k) {
+    for (j in 1:k) {
+      if (i != j) {
+        cohens_d_val <- cohens_d_matrix[i, j]
+        
+        if (!is.na(cohens_d_val)) {
+          annot_text <- sprintf("%.2f", cohens_d_val)
+          annot_matrix[i, j] <- annot_text
+          text_color_matrix[i, j] <- get_text_color(cohens_d_val, max_cohens_d)
+        }
+      }
+    }
+  }
+  
+  # Convert to long format
+  cohens_df <- expand.grid(From = 1:k, To = 1:k)
+  cohens_df$Value <- as.vector(cohens_d_matrix)
+  cohens_df$Annotation <- as.vector(annot_matrix)
+  cohens_df$TextColor <- as.vector(text_color_matrix)
+  cohens_df$From <- factor(paste0("CAP", cohens_df$From))
+  cohens_df$To <- factor(paste0("CAP", cohens_df$To))
+  
+  # Remove diagonal elements AND rows with NA values
+  cohens_df <- cohens_df[cohens_df$From != cohens_df$To & !is.na(cohens_df$Value), ]
+  
+  p <- ggplot(cohens_df, aes(x = To, y = From, fill = Value)) +
+    geom_tile(size = 0.8) +
+    scale_fill_gradient2(name = "Cohen's d",
+                         low = "darkblue", mid = "white", high = "darkred",
+                         midpoint = 0,
+                         limits = c(-max_cohens_d, max_cohens_d),
+                         na.value = "white",  # Make NA values white/transparent
+                         guide = guide_colorbar(barwidth = 2, 
+                                              barheight = 16,
+                                              title.position = "top",
+                                              title.hjust = 0.8,
+                                              label.theme = element_text(size = 14),
+                                              title.theme = element_text(size = 16, hjust = 0.5))) +
+    geom_text(aes(label = Annotation, color = TextColor), 
+              size = 18, 
+              angle = -45) +
+    scale_color_identity() +
+    labs(x = "", y = "") +
+    scale_y_discrete(limits = rev(levels(cohens_df$From))) +
+    theme_minimal() +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+          axis.title = element_text(size = 24),
+          legend.title = element_text(size = 16, face = "bold"),
+          legend.text = element_text(size = 14),
+          panel.border = element_rect(color = "black", fill = NA, size = 4),
+          panel.background = element_rect(fill = "white", color = NA))
+  
+  if (!show_colorbar) {
+    p <- p + guides(fill = "none")
+  }
+  
+  return(p)
+}
+```
+
+```{r create_plots}
+cat("\n\nCreating individual Cohen's d heatmaps...\n")
+
+# Create and save individual heatmaps
+for (idx in seq_along(comparisons)) {
+  comp <- comparisons[[idx]]
+  
+  cat(sprintf("Creating heatmap for %s...\n", comp$title))
+  
+  # Create plot without colorbar
+  p <- create_cohens_d_heatmap(comp, show_colorbar = FALSE)
+  
+  # Save plot
+  filename <- file.path(PLOTS_OUTPUT_DIR, paste0('cohens_d_heatmap_', comp$name, '.png'))
+  ggsave(filename, p, width = 12, height = 12, dpi = 400)
+  
+  cat(sprintf("  Saved to: %s\n", filename))
+  
+  # Print to console
+  print(p)
+}
+
+# Create colorbar
+cat("\nCreating separate colorbar...\n")
+
+colorbar_data <- data.frame(
+  x = 1,
+  y = seq(-0.6, 0.6, length.out = 100),
+  fill = seq(-0.6, 0.6, length.out = 100)
+)
+
+colorbar_plot <- ggplot(colorbar_data, aes(x = x, y = y, fill = fill)) +
+  geom_tile() +
+  scale_fill_gradient2(name = "Cohen's d", 
+                       low = "darkblue", mid = "white", high = "darkred",
+                       midpoint = 0,
+                       limits = c(-0.6, 0.6),
+                       breaks = c(-0.6, -0.3, 0, 0.3, 0.6),
+                       guide = guide_colorbar(barwidth = 30, 
+                                            barheight = 3,
+                                            title.position = "top",
+                                            title.hjust = 0.5,
+                                            label.theme = element_text(size = 40),
+                                            title.theme = element_text(size = 45, hjust = 0.5, face = "bold"))) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 45, face = "bold"),
+        legend.text = element_text(size = 40),
+        legend.margin = margin(t = 20, b = 20),
+        plot.margin = margin(t = 20, b = 20, l = 20, r = 20)) +
+  coord_fixed(ratio = 0.02)
+
+# Save colorbar
+colorbar_filename <- file.path(PLOTS_OUTPUT_DIR, 'cohens_d_colorbar.png')
+ggsave(colorbar_filename, colorbar_plot, width = 12, height = 4, dpi = 400)
+
+cat(sprintf("Saved colorbar to: %s\n", colorbar_filename))
+print(colorbar_plot)
+```
+
+Diagnostic: CAP7 -\> CAP6 undefined Cohen's d
+
+```{r}
+cat("=== DIAGNOSTIC: CAP7 -> CAP6 TRANSITION ===\n\n")
+
+# Pull raw values for every session
+cap7_to_6 <- transition_df %>%
+  filter(from_CAP == "CAP7" & to_CAP == "CAP6") %>%
+  select(subject, session, transition_probability) %>%
+  arrange(subject, session)
+
+cat("Raw data (all sessions):\n")
+print(cap7_to_6)
+
+# Per-session summary: mean, sd, n, n_unique
+cat("\nPer-session summary:\n")
+print(
+  cap7_to_6 %>%
+    group_by(session) %>%
+    summarise(
+      mean     = mean(transition_probability, na.rm = TRUE),
+      sd       = sd(transition_probability, na.rm = TRUE),
+      n        = n(),
+      n_unique = n_distinct(transition_probability),
+      n_zero   = sum(transition_probability < 0.001, na.rm = TRUE),
+      .groups  = "drop"
+    )
+)
+
+# For each comparison, show the paired differences that go into Cohen's d
+cat("\nPaired differences per comparison:\n")
+tp_wide_diag <- transition_df %>%
+  mutate(CAP_pair = paste0(from_CAP, "_", to_CAP)) %>%
+  pivot_wider(
+    id_cols     = c(subject, session),
+    names_from  = CAP_pair,
+    values_from = transition_probability,
+    values_fill = NA
+  )
+
+```

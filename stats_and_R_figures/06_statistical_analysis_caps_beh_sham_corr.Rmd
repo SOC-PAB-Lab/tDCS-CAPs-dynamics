@@ -1,0 +1,1095 @@
+---
+title: "Statistical analysis corerelations between CAPs dynamics under sham and paramters of behavioral taks under sham.Rmd"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-06-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(results="asis")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+## Overview
+
+This notebook investigates whether CAP dynamics under sham stimulation are associated with behavioral performance, also under sham — asking whether brain–behavior associations exist independently of active stimulation.
+
+To assess functional relevance, Spearman rank correlations are computed between CAP metrics (occurrence rate, dwell time for CAP4, CAP1→CAP7 transition probability) and behavioral parameters from four motor tasks (APM, VGR, OH, BOB), restricted to sham sessions.
+
+**Analysis steps:**
+
+1.  **Load CAP data** — occurrence rate, dwell time, and transition probability CSVs (`caps_dynamics_run-ON/caps_nclust-7/`).
+2.  **Load behavioral data** — anonymized CSVs for APM, VGR, OH, and BOB from `BEH_DATA_ANON_DIR/csv/`; young participants only.
+3.  **Correlate CAP4 OC/DT with behavior** — Spearman correlations in the sham session for all behavioral parameters.
+4.  **Correlate CAP1→CAP7 TP with behavior** — same approach for transition probability.
+5.  **Save results** — all and significant correlations saved to `results/stats/03_caps_beh_sham/`.
+6.  **Plot significant correlations** — scatter plots with regression lines saved to `results/main_figures/06_caps_beh_sham/`.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(janitor)
+library(ggpubr)
+library(rstatix)
+library(tidyverse)
+library(gtsummary)
+library(knitr)
+library(ggrepel)
+library(rstatix)
+library(sjPlot)
+library(sjtable2df)
+library(GGally)
+library(dplyr)
+```
+
+```{r}
+# Function to prepare data (reusing from your code)
+prepare_df <- function(file_path) {
+  # Read data from the provided file path
+  data <- read.csv(file_path)
+
+  # Clean up columns: remove original session/run and rename _name columns
+  data <- data %>%
+    select(-session, -run) %>%
+    rename(session = session_name, run = run_name)
+
+  # Filter to include only "On" data
+  data_on <- data %>% filter(run == "tDCS On")
+
+  # Convert factors with proper reference levels
+  data_on$session <- factor(data_on$session, levels = c("Sham", "Unilateral", "Bilateral"))
+  data_on$subject <- factor(data_on$subject)
+  return(data_on)
+}
+compute_session_deltas <- function(df, num_vars) {
+  # Create a new dataframe containing just the subjects
+  delta_df <- data.frame(subject = unique(df$subject))
+
+  # For each subject and each numerical variable, compute the delta values
+  for (var in num_vars) {
+    # Initialize columns for each delta comparison
+    delta_df[paste0(var, "_bi_sham")] <- NA
+    delta_df[paste0(var, "_bi_uni")] <- NA
+    delta_df[paste0(var, "_uni_sham")] <- NA
+
+    # Loop through each subject
+    for (subj in unique(df$subject)) {
+      # Extract data for the current subject
+      subj_data <- df[df$subject == subj, ]
+
+      # Get values for each session
+      sham_val <- subj_data[subj_data$session == "Sham", var]
+      bi_val <- subj_data[subj_data$session == "Bilateral", var]
+      uni_val <- subj_data[subj_data$session == "Unilateral", var]
+
+      # Compute deltas
+      if (length(sham_val) > 0 && length(bi_val) > 0) {
+        delta_df[delta_df$subject == subj, paste0(var, "_bi_sham")] <- bi_val - sham_val
+      }
+
+      if (length(bi_val) > 0 && length(uni_val) > 0) {
+        delta_df[delta_df$subject == subj, paste0(var, "_bi_uni")] <- bi_val - uni_val
+      }
+
+      if (length(uni_val) > 0 && length(sham_val) > 0) {
+        delta_df[delta_df$subject == subj, paste0(var, "_uni_sham")] <- uni_val - sham_val
+      }
+    }
+  }
+
+  return(delta_df)
+}
+```
+
+## Global params
+
+Global number of permutations and dirs
+
+```{r}
+library(dotenv)
+load_dot_env(file = "../.env")
+
+BASE_DIR          <- Sys.getenv("BASE_DIR")
+RESULTS_DIR       <- Sys.getenv("RESULTS_DIR")
+BEH_DATA_ANON_DIR <- Sys.getenv("BEH_DATA_ANON_DIR")
+
+INPUT_DIR_BEH  <- file.path(BEH_DATA_ANON_DIR, "csv")
+INPUT_DIR_CAPS <- file.path(BASE_DIR)
+
+OUTPUT_DIR       <- file.path(RESULTS_DIR, "stats", "03_caps_beh")
+PLOTS_OUTPUT_DIR <- file.path(RESULTS_DIR, "main_figures", "06_caps_beh")
+
+dir.create(OUTPUT_DIR,       recursive = TRUE, showWarnings = FALSE)
+dir.create(PLOTS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load CPAs data
+
+```{r}
+k=7
+k7_df_occ <- prepare_df(file.path(INPUT_DIR_CAPS, "caps_dynamics_run-ON", 
+                                 paste0("caps_nclust-", k), "CAP_occurence_times.csv"))
+
+k7_df_dt <- prepare_df(file.path(INPUT_DIR_CAPS, "caps_dynamics_run-ON", 
+                                paste0("caps_nclust-", k), "CAP_dwelltime.csv"))
+
+str(k7_df_occ)
+head(k7_df_occ)
+
+str(k7_df_dt)
+head(k7_df_dt)
+```
+
+# Load CPAs transition prob data
+
+```{r}
+cap_tp_full <- prepare_df(file.path(INPUT_DIR_CAPS, "caps_dynamics_run-ON",
+                                "caps_nclust-7", "CAP_transitions_full.csv"))
+
+str(cap_tp_full)
+head(cap_tp_full)
+```
+
+```{r}
+cap_tp_1_7 <- cap_tp_full %>% filter(from_CAP=="CAP1" & to_CAP=="CAP7")
+
+str(cap_tp_1_7)
+head(cap_tp_1_7)
+```
+
+# Load behavioral data
+
+## APM
+
+Left hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH, "APM_left_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH, "APM_left_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH, "APM_left_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness,
+                                  stimulation_condition, active_arm,
+                                  abs_error_x_m,
+                                  abs_error_y_m,
+                                  variability_x_m,
+                                  variability_y_m,
+                                  contraction_expansion_ratio_x,
+                                  contraction_expansion_ratio_y,
+                                  shift_x_m,
+                                  shift_y_m)
+
+
+# Convert all numeric variables
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+comb_data_l <- comb_data
+table(comb_data_l$stimulation_condition)
+head(comb_data_l)
+```
+
+Righ hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH,"APM_right_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH,"APM_right_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH,"APM_right_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness,
+                                  stimulation_condition, active_arm,
+                                  abs_error_x_m,
+                                  abs_error_y_m,
+                                  variability_x_m,
+                                  variability_y_m,
+                                  contraction_expansion_ratio_x,
+                                  contraction_expansion_ratio_y,
+                                  shift_x_m,
+                                  shift_y_m)
+
+
+#co# Convert all numeric variables
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+comb_data_r <- comb_data
+table(comb_data_r$stimulation_condition)
+head(comb_data_r)
+```
+
+```{r}
+conatinated_apm <- rbind(comb_data_l, comb_data_r)
+head(conatinated_apm)
+tail(conatinated_apm)
+str(conatinated_apm)
+```
+
+```{r}
+apm_wide <- conatinated_apm %>%
+  mutate(arm_prefix = ifelse(active_arm == "LEFT", "LH", "RH")) %>%
+  pivot_wider(
+    id_cols = c("subject", "neuron_id", "handedness", "session"),
+    names_from = arm_prefix,
+    values_from = c(
+      "fraction_complete",
+      "abs_error_x_m",
+      "abs_error_y_m",
+      "variability_x_m",
+      "variability_y_m",
+      "contraction_expansion_ratio_x",
+      "contraction_expansion_ratio_y",
+      "shift_x_m",
+      "shift_y_m"
+    ),
+    names_glue = "{arm_prefix}_{.value}"
+  )
+
+str(apm_wide)
+
+head(apm_wide)
+```
+
+```{r, results='hide'}
+apm_behavior_vars <- c(
+  "abs_error_x_m",
+  "abs_error_y_m",
+      "variability_x_m",
+      "variability_y_m",
+      "contraction_expansion_ratio_x",
+      "contraction_expansion_ratio_y",
+      "shift_x_m",
+      "shift_y_m"
+                       )
+
+apm_behavior_vars_lh <- paste0("LH_", apm_behavior_vars)
+apm_behavior_vars_rh <- paste0("RH_", apm_behavior_vars)
+
+# Combine both LH and RH behavior variables
+apm_behavior_vars_both_hands <- c(apm_behavior_vars_lh, apm_behavior_vars_rh)
+```
+
+## VGR
+
+Left hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_left_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_left_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_left_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness,
+                                  stimulation_condition, active_arm,
+                                  posture_speed_m_s,
+                                  reaction_time_s,
+                                  initial_direction_angle_rad,
+                                  initial_distance_ratio,
+                                  initial_speed_ratio,
+                                  speed_maxima_count,
+                                  movement_time_s,
+                                  path_length_ratio,
+                                  false_starts)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+comb_data_l <- comb_data
+# Verifying the result
+table(comb_data_l$stimulation_condition, comb_data_l$session)
+head(comb_data_l)
+```
+
+Right hand
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_right_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_right_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH,"VGR_right_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness,
+                                  stimulation_condition, active_arm,
+                                  posture_speed_m_s,
+                                  reaction_time_s,
+                                  initial_direction_angle_rad,
+                                  initial_distance_ratio,
+                                  initial_speed_ratio,
+                                  speed_maxima_count,
+                                  movement_time_s,
+                                  path_length_ratio,
+                                  false_starts)
+
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+comb_data_r <- comb_data
+# Verifying the result
+table(comb_data_r$stimulation_condition, comb_data_r$session)
+head(comb_data_r)
+```
+
+```{r}
+conatinated_vgr <- rbind(comb_data_l, comb_data_r)
+head(conatinated_vgr)
+tail(conatinated_vgr)
+table(conatinated_vgr$active_arm, conatinated_vgr$session)
+```
+
+```{r}
+vgr_wide <- conatinated_vgr %>%
+  mutate(arm_prefix = ifelse(active_arm == "LEFT", "LH", "RH")) %>%
+  pivot_wider(
+    id_cols = c("subject", "neuron_id", "handedness", "session"),
+    names_from = arm_prefix,
+    values_from = c("fraction_complete",
+                    "posture_speed_m_s",
+                    "reaction_time_s",
+                    "initial_direction_angle_rad",
+                    "initial_distance_ratio",
+                    "initial_speed_ratio",
+                    "speed_maxima_count",
+                    "movement_time_s",
+                    "path_length_ratio",
+                    "false_starts"
+    ),
+    names_glue = "{arm_prefix}_{.value}"
+  )
+
+str(vgr_wide)
+
+head(vgr_wide)
+```
+
+```{r, results='hide'}
+cap_vars <- c("CAP4")
+vgr_behavior_vars <- c("posture_speed_m_s", 
+                       "reaction_time_s", 
+                       "initial_direction_angle_rad", 
+                       "initial_distance_ratio", 
+                       "initial_speed_ratio", 
+                       "speed_maxima_count",
+                       "movement_time_s", 
+                       "path_length_ratio", 
+                       "false_starts")
+
+vgr_behavior_vars_lh <- paste0("LH_", vgr_behavior_vars)
+vgr_behavior_vars_rh <- paste0("RH_", vgr_behavior_vars)
+
+# Combine both LH and RH behavior variables
+vgr_behavior_vars_both_hands <- c(vgr_behavior_vars_lh, vgr_behavior_vars_rh)
+```
+
+## OH
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH,"OH_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH,"OH_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH,"OH_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete,
+                                  handedness, stimulation_condition, active_arm,
+                                  total_hits,
+                                  hits_with_left,
+                                  hits_with_right,
+                                  hand_bias_of_hits,
+                                  median_error,
+                                  miss_bias,
+                                  hand_speed_right_m_s,
+                                  hand_speed_left_m_s,
+                                  hand_speed_bias,
+                                  movement_area_right_hand_m_2, 
+                                  movement_area_left_hand_m_2,
+                                  movement_area_bias,
+                                  hand_transition,
+                                  hand_selection_overlap)
+
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+# Verifying the result
+oh_data <- comb_data
+table(oh_data$stimulation_condition, oh_data$session)
+head(oh_data)
+```
+
+```{r}
+cap_vars <- c("CAP4")
+oh_behavior_vars <- c("total_hits", 
+                   "hits_with_left", 
+                   "hits_with_right", 
+                   "hand_bias_of_hits",
+                   "median_error", 
+                   "miss_bias", 
+                   "hand_speed_right_m_s",
+                   "hand_speed_left_m_s", 
+                   "hand_speed_bias", 
+                   "movement_area_right_hand_m_2", 
+                   "movement_area_left_hand_m_2", 
+                   "movement_area_bias", 
+                   "hand_transition",
+                   "hand_selection_overlap")
+
+```
+
+## BOB
+
+```{r, results='hide'}
+bi_data <- read.csv(file.path(INPUT_DIR_BEH,"BOB_bi.csv"), check.names=TRUE)
+bi_data <- bi_data %>% clean_names()
+
+ua_data <- read.csv(file.path(INPUT_DIR_BEH,"BOB_ua.csv"), check.names=TRUE)
+ua_data <- ua_data %>% clean_names()
+
+sham_data <- read.csv(file.path(INPUT_DIR_BEH,"BOB_sham.csv"), check.names=TRUE)
+sham_data <- sham_data %>% clean_names()
+
+comb_data <- rbind(ua_data, bi_data, sham_data)
+
+## Choose only young participants
+comb_data <- comb_data[startsWith(as.character(comb_data$neuron_id), 'Y_'),]
+
+## Factorial variables
+comb_data$stimulation_condition <- factor(comb_data$stimulation_condition)
+comb_data$active_arm <- factor(comb_data$active_arm)
+comb_data$session_no <- ordered(comb_data$session_no, levels=c(1, 2, 3))
+
+comb_data <- comb_data %>% dplyr::select(neuron_id, session_no, fraction_complete, handedness,
+                                  stimulation_condition, active_arm,
+                                  x1_targets_completed,
+                                  x2_targets_completed,
+                                  x3_targets_completed,
+                                  #x2_drops,#variance=0
+                                  x3_drops,#
+                                  #x2_drops_targets,##variance=0
+                                  x3_drops_targets,#
+                                  x1_mean_movement_time_s,
+                                  x2_mean_movement_time_s,
+                                  x3_mean_movement_time_s,
+                                  x1_right_hand_speed_maxima,
+                                  x2_right_hand_speed_maxima,
+                                  x3_right_hand_speed_maxima,
+                                  x1_left_hand_speed_maxima,
+                                  x2_left_hand_speed_maxima,
+                                  x3_left_hand_speed_maxima,
+                                  x1_mean_bar_angle_rad,
+                                  x2_mean_bar_angle_rad,
+                                  x3_mean_bar_angle_rad,
+                                  x1_bar_length_variability,#
+                                  x2_bar_length_variability,#
+                                  x3_bar_length_variability,#
+                                  x1_reaction_time_abs_diff_s,
+                                  x1_hand_speed_diff_m_s,
+                                  x2_hand_speed_diff_m_s,
+                                  x3_hand_speed_diff_m_s
+                                  )
+
+bob_behavior_vars <- c(
+  "x1_targets_completed",
+  "x2_targets_completed",
+  "x3_targets_completed",
+  #"x2_drops", #variance=0
+  "x3_drops",
+  #"x2_drops_targets", #variance=0
+  "x3_drops_targets",
+  "x1_mean_movement_time_s",
+  "x2_mean_movement_time_s",
+  "x3_mean_movement_time_s",
+  "x1_right_hand_speed_maxima",
+  "x2_right_hand_speed_maxima",
+  "x3_right_hand_speed_maxima",
+  "x1_left_hand_speed_maxima",
+  "x2_left_hand_speed_maxima",
+  "x3_left_hand_speed_maxima",
+  "x1_mean_bar_angle_rad",
+  "x2_mean_bar_angle_rad",
+  "x3_mean_bar_angle_rad",
+  "x1_bar_length_variability",
+  "x2_bar_length_variability",
+  "x3_bar_length_variability",
+  "x1_reaction_time_abs_diff_s",
+  "x1_hand_speed_diff_m_s",
+  "x2_hand_speed_diff_m_s",
+  "x3_hand_speed_diff_m_s"
+)
+
+# Convert all numeric variables
+comb_data <- comb_data %>%
+  mutate(across(all_of(bob_behavior_vars), as.numeric))
+
+comb_data <- comb_data %>%
+  mutate(subject = gsub("_", "", neuron_id))
+
+comb_data$session <- as.character(comb_data$stimulation_condition)
+
+# Applying the mappings
+comb_data$session[comb_data$session == "bi-tDCS"] <- "Bilateral"
+comb_data$session[comb_data$session == "sham"] <- "Sham"
+comb_data$session[comb_data$session == "ua-tDCS"] <- "Unilateral"
+comb_data$session <- factor(comb_data$session, levels = c("Sham", "Unilateral", "Bilateral"))
+
+bob_data <- comb_data
+# Verifying the result
+table(bob_data$stimulation_condition,bob_data$session)
+head(bob_data)
+```
+
+# Correlate with CAP4
+
+```{r}
+# Function to correlate CAP4 with behavioral variables in Sham condition
+correlate_sham_cap_behavior <- function(cap_data, behavior_data, behavior_vars, task_name, cap_metric, method = "spearman") {
+  
+  results <- data.frame()
+  
+  # Merge CAP and behavior data
+  merged_data <- merge(cap_data, behavior_data, by = c("subject", "session"))
+  
+  # Filter for Sham condition only
+  sham_data <- merged_data %>% filter(session == "Sham")
+  
+  if (nrow(sham_data) < 5) {
+    cat("Not enough Sham data for", task_name, "\n")
+    return(data.frame())
+  }
+  
+  # Correlate CAP4 with each behavioral variable
+  for (var in behavior_vars) {
+    if (var %in% names(sham_data)) {
+      # Remove missing data
+      clean_data <- sham_data[complete.cases(sham_data[c("CAP4", var)]), ]
+      
+      if (nrow(clean_data) >= 5) {
+        # Calculate correlation
+        cor_test <- cor.test(clean_data$CAP4, clean_data[[var]], method = method)
+        
+        # Handle confidence intervals (only available for Pearson)
+        if (method == "pearson" && !is.null(cor_test$conf.int)) {
+          ci_lower <- cor_test$conf.int[1]
+          ci_upper <- cor_test$conf.int[2]
+        } else {
+          ci_lower <- NA
+          ci_upper <- NA
+        }
+        
+        # Store results
+        results <- rbind(results, data.frame(
+          task = task_name,
+          cap_metric = cap_metric,
+          parameter = var,
+          r_value = as.numeric(cor_test$estimate),
+          p_value = cor_test$p.value,
+          n_obs = nrow(clean_data),
+          ci_lower = ci_lower,
+          ci_upper = ci_upper,
+          method = method,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+  
+  return(results)
+}
+
+
+# Load all data
+cat("Loading data...\n")
+apm_data <- apm_wide
+vgr_data <- vgr_wide
+oh_data <- oh_data
+bob_data <- bob_data
+apm_behavior_vars <- apm_behavior_vars_both_hands
+vgr_behavior_vars <- vgr_behavior_vars_both_hands 
+
+# Run correlations for all tasks and both CAP metrics
+cat("Running correlations...\n")
+
+all_sham_correlations <- rbind(
+  # Occurrence Rate
+  correlate_sham_cap_behavior(k7_df_occ, apm_data, apm_behavior_vars, "APM", "Occurrence"),
+  correlate_sham_cap_behavior(k7_df_occ, vgr_data, vgr_behavior_vars, "VGR", "Occurrence"),
+  correlate_sham_cap_behavior(k7_df_occ, oh_data, oh_behavior_vars, "OH", "Occurrence"),
+  correlate_sham_cap_behavior(k7_df_occ, bob_data, bob_behavior_vars, "BOB", "Occurrence"),
+  
+  # Dwell Time
+  correlate_sham_cap_behavior(k7_df_dt, apm_data, apm_behavior_vars, "APM", "Dwell_Time"),
+  correlate_sham_cap_behavior(k7_df_dt, vgr_data, vgr_behavior_vars, "VGR", "Dwell_Time"),
+  correlate_sham_cap_behavior(k7_df_dt, oh_data, oh_behavior_vars, "OH", "Dwell_Time"),
+  correlate_sham_cap_behavior(k7_df_dt, bob_data, bob_behavior_vars, "BOB", "Dwell_Time")
+)
+
+# Add significance indicators
+all_sham_correlations$significance <- case_when(
+  all_sham_correlations$p_value < 0.001 ~ "***",
+  all_sham_correlations$p_value < 0.01 ~ "**",
+  all_sham_correlations$p_value < 0.05 ~ "*",
+  TRUE ~ ""
+)
+
+# Display results
+cat("Summary of Sham Condition Correlations (CAP4 vs Behavioral Parameters):\n")
+cat("Total correlations computed:", nrow(all_sham_correlations), "\n")
+cat("Significant correlations (p < 0.05):", sum(all_sham_correlations$p_value < 0.05), "\n")
+
+# Show significant results
+significant_sham_oc_dt <- all_sham_correlations %>% 
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+if (nrow(significant_sham_oc_dt) > 0) {
+  cat("\nSignificant correlations:\n")
+  print(significant_sham_oc_dt[, c("task", "cap_metric", "parameter", "r_value", "p_value", "significance")])
+} else {
+  cat("\nNo significant correlations found.\n")
+}
+
+```
+
+# Correlate with CAP1-\>CAP7 TP
+
+```{r}
+# Function to correlate transition probability with behavioral variables in Sham condition
+correlate_sham_cap_behavior <- function(cap_data, behavior_data, behavior_vars, task_name, cap_metric, method = "spearman") {
+  
+  results <- data.frame()
+  
+  # Merge CAP and behavior data
+  merged_data <- merge(cap_data, behavior_data, by = c("subject", "session"))
+  
+  # Filter for Sham condition only
+  sham_data <- merged_data %>% filter(session == "Sham")
+  
+  if (nrow(sham_data) < 5) {
+    cat("Not enough Sham data for", task_name, "\n")
+    return(data.frame())
+  }
+  
+  # Correlate CAP4 with each behavioral variable
+  for (var in behavior_vars) {
+    if (var %in% names(sham_data)) {
+      # Remove missing data
+      clean_data <- sham_data[complete.cases(sham_data[c("transition_probability", var)]), ]
+      
+      if (nrow(clean_data) >= 5) {
+        # Calculate correlation
+        cor_test <- cor.test(clean_data$transition_probability, clean_data[[var]], method = method)
+        
+        # Handle confidence intervals (only available for Pearson)
+        if (method == "pearson" && !is.null(cor_test$conf.int)) {
+          ci_lower <- cor_test$conf.int[1]
+          ci_upper <- cor_test$conf.int[2]
+        } else {
+          ci_lower <- NA
+          ci_upper <- NA
+        }
+        
+        # Store results
+        results <- rbind(results, data.frame(
+          task = task_name,
+          cap_metric = cap_metric,
+          parameter = var,
+          r_value = as.numeric(cor_test$estimate),
+          p_value = cor_test$p.value,
+          n_obs = nrow(clean_data),
+          ci_lower = ci_lower,
+          ci_upper = ci_upper,
+          method = method,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+  
+  return(results)
+}
+
+
+
+# Run correlations for all tasks and both CAP metrics
+cat("Running correlations...\n")
+
+all_sham_tp_correlations <- rbind(
+  # Occurrence Rate
+  correlate_sham_cap_behavior(cap_tp_1_7, apm_data, apm_behavior_vars, "APM", "transition_probability"),
+  correlate_sham_cap_behavior(cap_tp_1_7, vgr_data, vgr_behavior_vars, "VGR", "transition_probability"),
+  correlate_sham_cap_behavior(cap_tp_1_7, oh_data, oh_behavior_vars, "OH", "transition_probability"),
+  correlate_sham_cap_behavior(cap_tp_1_7, bob_data, bob_behavior_vars, "BOB", "transition_probability")
+)
+
+# Add significance indicators
+all_sham_tp_correlations$significance <- case_when(
+  all_sham_tp_correlations$p_value < 0.001 ~ "***",
+  all_sham_tp_correlations$p_value < 0.01 ~ "**",
+  all_sham_tp_correlations$p_value < 0.05 ~ "*",
+  TRUE ~ ""
+)
+
+# Display results
+cat("Summary of Sham Condition Correlations (CAP4 vs Behavioral Parameters):\n")
+cat("Total correlations computed:", nrow(all_sham_tp_correlations), "\n")
+cat("Significant correlations (p < 0.05):", sum(all_sham_tp_correlations$p_value < 0.05), "\n")
+
+# Show significant results
+significant_sham_tp <- all_sham_tp_correlations %>% 
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+if (nrow(significant_sham_tp) > 0) {
+  cat("\nSignificant correlations:\n")
+  print(significant_sham_tp[, c("task", "cap_metric", "parameter", "r_value", "p_value", "significance")])
+} else {
+  cat("\nNo significant correlations found.\n")
+}
+
+```
+
+## Summary
+
+```{r}
+sham_all_metrics_sig_corrs <- rbind(significant_sham_oc_dt, significant_sham_tp)
+str(sham_all_metrics_sig_corrs)
+head(sham_all_metrics_sig_corrs, 8)
+```
+
+## Save
+
+```{r}
+all_results <- rbind(all_sham_correlations, all_sham_tp_correlations) %>%
+  rename(metric = cap_metric, correlation = r_value, sig = significance) %>%
+  mutate(r_squared = correlation^2) %>%
+  dplyr::select(task, metric, parameter, correlation, p_value, r_squared, n_obs, sig) %>%
+  arrange(p_value)
+
+write.csv(all_results, file.path(OUTPUT_DIR, "sham_correlations_data.csv"), row.names = FALSE)
+```
+
+```{r, fig.width=14, fig.height=4}
+# --- Step 1: Load libraries ---
+# Load the package for nested facets
+library(ggh4x) 
+
+# --- Step 3: Prepare all CAP data in a long format ---
+# We only need the metrics that were significant
+cap_occ_long <- k7_df_occ %>%
+  filter(session == "Sham") %>%
+  select(subject, CAP4) %>%
+  rename(value = CAP4) %>%
+  mutate(cap_metric = "Occurrence")
+
+cap_tp_long <- cap_tp_1_7 %>%
+  filter(session == "Sham") %>%
+  select(subject, transition_probability) %>%
+  rename(value = transition_probability) %>%
+  mutate(cap_metric = "transition_probability")
+
+# Combine all *relevant* CAP data. 
+# k7_df_dt (Dwell Time) is no longer needed here since it had no sig. correlations.
+all_cap_data_long <- rbind(cap_occ_long, cap_tp_long)
+
+# --- Step 4: Prepare all Behavioral data in a long format ---
+# We only need the data frames and variables that were significant
+apm_data_long <- apm_data %>%
+  filter(session == "Sham") %>%
+  pivot_longer(
+    cols = all_of(apm_behavior_vars_both_hands),
+    names_to = "parameter",
+    values_to = "beh_value"
+  ) %>%
+  mutate(task = "APM") %>%
+  select(subject, task, parameter, beh_value)
+
+vgr_data_long <- vgr_data %>%
+  filter(session == "Sham") %>%
+  pivot_longer(
+    cols = all_of(vgr_behavior_vars_both_hands),
+    names_to = "parameter",
+    values_to = "beh_value"
+  ) %>%
+  mutate(task = "VGR") %>%
+  select(subject, task, parameter, beh_value)
+
+bob_data_long <- bob_data %>%
+  filter(session == "Sham") %>%
+  pivot_longer(
+    cols = all_of(bob_behavior_vars),
+    names_to = "parameter",
+    values_to = "beh_value"
+  ) %>%
+  mutate(task = "BOB") %>%
+  select(subject, task, parameter, beh_value)
+
+# Combine all behavioral data
+all_beh_data_long <- rbind(apm_data_long, vgr_data_long, bob_data_long)
+
+# --- Step 5: Create the final plotting data frame ---
+# Join significant correlations with CAP data
+plot_data_step1 <- inner_join(
+  sham_all_metrics_sig_corrs,
+  all_cap_data_long,
+  by = "cap_metric"
+)
+
+# Join with behavioral data
+plot_data_final <- inner_join(
+  plot_data_step1,
+  all_beh_data_long,
+  by = c("subject", "task", "parameter")
+) %>%
+  mutate(
+    # Remap cap_metric names for the title per your request
+    cap_metric_title = case_when(
+      cap_metric == "Occurrence" ~ "CAP4 OC",
+      cap_metric == "transition_probability" ~ "CAP1 to CAP7 TP",
+      TRUE ~ cap_metric # Fallback
+    ),
+    
+    # Create the text label for the plot
+    plot_label = sprintf("rho ~ '=' ~ %.2f*',' ~ p ~ '=' ~ %.3f", r_value, p_value)
+  )
+
+
+plot_data_final <- plot_data_final %>%
+  mutate(
+    cap_metric_title = fct_relevel(cap_metric_title,
+                                   "CAP4 OC", "CAP1 to CAP7 TP"),
+    task = fct_relevel(task,c("VGR", "BOB", "APM")))
+head(plot_data_final)
+tail(plot_data_final)
+```
+
+```{r, fig.width=14, fig.height=4}
+
+p_sham <- ggplot(plot_data_final, aes(x = value, y = beh_value)) +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "gray80", alpha = 0.2) +
+  
+  # Add correlation text (rho and p-value)
+  geom_text(
+    data = distinct(plot_data_final, cap_metric_title, task, parameter, plot_label),
+    aes(label = plot_label),
+    x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+    size = 3, parse = TRUE
+  ) +
+  
+  # Use facet_nested_wrap to create hierarchical strip titles
+  ggh4x::facet_nested_wrap(
+    ~ cap_metric_title + task + parameter,
+    nrow = 1,
+    scales = "free" # Keep scales free for each plot
+  ) +
+  
+  # Add axis labels
+  labs(
+    x = "CAP Metric Value (Sham Condition)",
+    y = "Behavioral Parameter Value (Sham Condition)"
+  ) +
+  
+  # Apply a clean, journal-ready theme
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 8),
+    
+    # Style the nested strip titles
+    strip.background = element_rect(color = "black", fill = "grey90"),
+    strip.text = element_text(size = 8, face = "bold", margin = margin(2, 2, 2, 2)),
+    
+    # Add a small space between the nested strips
+    ggh4x.facet.nestline = element_line(color = "black"),
+    
+    # Adjust the horizontal spacing between panels
+    panel.spacing.x = unit(1.5, "lines") 
+  )
+
+print(p_sham)
+
+ggsave(
+  file.path(PLOTS_OUTPUT_DIR, "Sham_correlations_clean_wide.png"),
+  p_sham,
+  width = 14,
+  height = 4,
+  dpi = 600,
+  bg = "white"
+)
+```
+
+```{r, fig.width=15, fig.height=3}
+
+p_sham_clean <- ggplot(plot_data_final, aes(x = value, y = beh_value)) +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "gray60", alpha = 0.2) +
+  
+  # Add correlation text (rho and p-value)
+  # geom_text(
+  #   data = distinct(plot_data_final, cap_metric_title, task, parameter, plot_label),
+  #   aes(label = plot_label),
+  #   x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+  #   size = 5, parse = TRUE
+  # ) +
+  
+  # Use facet_nested_wrap to create hierarchical strip titles
+  ggh4x::facet_nested_wrap(
+    ~ cap_metric_title + task + parameter,
+    nrow = 1,
+    scales = "free" # Keep scales free for each plot
+  ) +
+  
+  labs(x = NULL, y = NULL) +
+  theme_classic() +
+  
+  # Remove all titles, text, and backgrounds 
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line = element_line(color = "black"),
+    
+    # Keep axis tick text (the numbers) but remove titles
+    axis.title = element_blank(), 
+    axis.text = element_text(size = 14),
+    
+    # Remove all strip text and backgrounds
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    
+    # Remove the nesting line
+    ggh4x.facet.nestline = element_blank(),
+    
+    # Keep the panel spacing
+    panel.spacing.x = unit(1.5, "lines") 
+  )
+
+print(p_sham_clean)
+
+# Save clean plot for photoshop
+ggsave(
+  file.path(PLOTS_OUTPUT_DIR, "Sham_correlations_CLEAN_for_photoshop.png"),
+  p_sham_clean,
+  width = 15,
+  height = 2.5,
+  dpi = 600,
+  bg = "white"
+)
+```

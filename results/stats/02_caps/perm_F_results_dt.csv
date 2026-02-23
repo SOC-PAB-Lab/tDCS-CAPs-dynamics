@@ -1,0 +1,8 @@
+"parameter","f_statistic","p_value","n_valid_perms","n_obs","singular_warnings","original_singular","significance"
+"CAP1",1.84174640914543,0.11,100,60,0,FALSE,"ns"
+"CAP2",0.196956101603877,0.84,100,60,0,FALSE,"ns"
+"CAP3",0.291806096847453,0.75,100,60,0,FALSE,"ns"
+"CAP4",2.94846498344753,0.05,100,60,0,FALSE,"ns"
+"CAP5",0.407736385870903,0.68,100,60,0,FALSE,"ns"
+"CAP6",0.519367570293785,0.6,100,60,0,FALSE,"ns"
+"CAP7",0.331924693777928,0.78,100,60,0,FALSE,"ns"
