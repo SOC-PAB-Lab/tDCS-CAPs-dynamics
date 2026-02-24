@@ -9,7 +9,11 @@ Salameh H\*, Muffel T\*, Serhan Y, Samara M, Nenning K-H, Hertz U, Villringer A,
 
 ## Overview
 
-Analysis pipeline for a concurrent tDCS-fMRI study (N=20, double-blind crossover) examining how unilateral and bilateral M1 tDCS modulate whole-brain dynamics and sensorimotor behavior. CAP analysis identified seven recurring brain states; bilateral stimulation selectively increased frontoparietal state occurrence and reduced transitions to thalamic–subcortical states, with effects correlating with motor performance.
+Analysis code for a concurrent tDCS-fMRI study (N=20, double-blind sham-controlled crossover) examining how unilateral and bilateral M1 tDCS modulate whole-brain dynamics and sensorimotor behavior. The code covers:
+- **Preprocessing** of fMRI data
+- **CAP analysis** to identify recurring large-scale brain states from resting-state fMRI
+- **Statistical analysis** of tDCS effects on behavior (robotic kinematic tasks) and CAP dynamics
+- **Brain–behavior associations** between bilateral-sensitive CAP metrics and sensorimotor performance
 
 ---
 
