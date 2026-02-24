@@ -80,6 +80,8 @@ get_perm_f_val_caps <- function(data, param_list, n_perm = 10000,
   results_df <- data.frame(
     parameter = character(),
     f_statistic = numeric(),
+    df_num = numeric(),
+    df_denom = numeric(),
     p_value = numeric(),
     n_valid_perms = integer(),
     n_obs = integer(),
@@ -130,6 +132,8 @@ get_perm_f_val_caps <- function(data, param_list, n_perm = 10000,
         data.frame(
           parameter = param,
           f_statistic = NA_real_,
+          df_num = NA_real_,
+          df_denom = NA_real_,
           p_value = NA_real_,
           n_valid_perms = 0L,
           n_obs = n_obs,
@@ -160,6 +164,8 @@ get_perm_f_val_caps <- function(data, param_list, n_perm = 10000,
       data.frame(
         parameter = param,
         f_statistic = perm_result$original_f,
+        df_num = perm_result$df_num,
+        df_denom = perm_result$df_denom,
         p_value = perm_result$p_value,
         n_valid_perms = perm_result$n_valid_perms,
         n_obs = n_obs,
@@ -200,7 +206,16 @@ permutation_test_lmer <- function(formula, data, group_var, subject_col, n_perm 
     stop("Error fitting original model: ", e$message)
   })
 
-  original_fstat <- anova(original_model)$`F value`[1]
+  anova_tbl      <- anova(original_model)
+  original_fstat <- anova_tbl$`F value`[1]
+  # df_num: always k-1 conditions (robust to anova table column name differences)
+  df_num         <- nlevels(data[[group_var]]) - 1L
+  # df_denom: Satterthwaite via lmerTest (convert without refitting)
+  lt_anova       <- tryCatch(
+    anova(lmerTest::as_lmerModLmerTest(original_model)),
+    error = function(e) NULL
+  )
+  df_denom       <- if (!is.null(lt_anova) && "DenDF" %in% names(lt_anova)) lt_anova$DenDF[1] else NA_real_
 
   # Permutation test: shuffle group labels WITHIN each subject
   perm_fstats <- numeric(n_perm)
@@ -238,6 +253,8 @@ permutation_test_lmer <- function(formula, data, group_var, subject_col, n_perm 
 
   list(
     original_f = original_fstat,
+    df_num = df_num,
+    df_denom = df_denom,
     p_value = p_value,
     n_valid_perms = length(perm_fstats),
     singular_warnings = singular_count,
@@ -254,7 +271,7 @@ Global number of permutations and dirs
 library(dotenv)
 load_dot_env(file = "../.env")
 
-N_PERM = 100 #now to check if it run will return back to 10,000
+N_PERM = 10000
 
 BASE_DIR    <- Sys.getenv("BASE_DIR")
 RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
@@ -352,7 +369,7 @@ write.csv(occ_permutation_results,
           file.path(OUTPUT_DIR, "perm_F_results_occ.csv"), row.names = FALSE)
 write.csv(dt_permutation_results,
           file.path(OUTPUT_DIR, "perm_F_results_dt.csv"), row.names = FALSE)
-write.csv(tp_permutation_results_clean,
+write.csv(tp_permutation_results,
           file.path(OUTPUT_DIR, "perm_F_results_tp.csv"), row.names = FALSE)
 ```
 
@@ -386,6 +403,7 @@ perform_pairwise_tests <- function(
     parameter = character(),
     comparison = character(),
     n_pairs = integer(),
+    df = integer(),
     statistic = numeric(),
     p_value = numeric(),
     p_corrected = numeric(),
@@ -395,12 +413,13 @@ perform_pairwise_tests <- function(
   )
 
   for (param in cap_params) {
-    
+
     # Collect this parameter's three pairwise tests
     param_results <- data.frame(
       parameter = character(),
       comparison = character(),
       n_pairs = integer(),
+      df = integer(),
       statistic = numeric(),
       p_value = numeric(),
       cohens_d = numeric(),
@@ -441,6 +460,7 @@ perform_pairwise_tests <- function(
             parameter = param,
             comparison = paste(cond1, "vs", cond2),
             n_pairs = length(data1),
+            df = NA_integer_,
             statistic = NA_real_,
             p_value = NA_real_,
             cohens_d = NA_real_,
@@ -463,6 +483,7 @@ perform_pairwise_tests <- function(
           parameter = param,
           comparison = paste(cond1, "vs", cond2),
           n_pairs = length(dvals),
+          df = length(dvals) - 1L,
           statistic = unname(perm_test$statistic),
           p_value = unname(perm_test$p.value),
           cohens_d = cohens_d_val,
@@ -481,7 +502,7 @@ perform_pairwise_tests <- function(
 
     # 8) Append to all results
     results_df <- rbind(results_df,
-                        param_results[, c("parameter","comparison","n_pairs","statistic","p_value","p_corrected","cohens_d","significance")])
+                        param_results[, c("parameter","comparison","n_pairs","df","statistic","p_value","p_corrected","cohens_d","significance")])
   }
 
   # Significant-only view
@@ -614,14 +635,6 @@ write.csv(dt_posthoc$all,
           file.path(OUTPUT_DIR, "perm_posthoc_dt.csv"), row.names = FALSE)
 write.csv(tp_posthoc$all,
           file.path(OUTPUT_DIR, "perm_posthoc_tp.csv"), row.names = FALSE)
-
-# --- Optional: Save RDS versions (keeps attributes and list structure) ---
-saveRDS(list(F = occ_permutation_results, posthoc = occ_posthoc),
-        file.path(OUTPUT_DIR, "occ_results.rds"))
-saveRDS(list(F = dt_permutation_results, posthoc = dt_posthoc),
-        file.path(OUTPUT_DIR, "dt_results.rds"))
-saveRDS(list(F = tp_permutation_results_clean, posthoc = tp_posthoc),
-        file.path(OUTPUT_DIR, "tp_results.rds"))
 
 # --- Metadata for reproducibility ---
 meta <- data.frame(
