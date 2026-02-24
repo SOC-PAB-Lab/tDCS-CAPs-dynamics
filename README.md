@@ -3,7 +3,8 @@
 Code for the paper:
 
 **Bilateral M1 tDCS modulates dynamic large-scale brain states associated with sensorimotor control** <br>
-Salameh H\*, Muffel T\*, Serhan Y, Samara M, Nenning K-H, Hertz U, Villringer A, Sehm B#, Ovadia-Caro S# (\*equal contribution, #equal correspondence)
+Salameh H\*, Muffel T\*, Serhan Y, Samara M, Nenning K-H, Hertz U, Villringer A, Sehm B#, Ovadia-Caro S# <br>
+(\*equal contribution, #equal correspondence)
 
 ---
 
