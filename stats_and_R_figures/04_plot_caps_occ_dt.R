@@ -19,7 +19,7 @@ library(tidyverse)
 library(patchwork)
 library(RColorBrewer)
 
-load_dot_env(file = "../.env")
+load_dot_env()
 
 BASE_DIR    <- Sys.getenv("BASE_DIR")
 RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
