@@ -27,8 +27,7 @@ tDCS-CAPs-dynamics/
 ├── stats_and_R_figures/
 ├── data/
 ├── results/
-├── .env.example
-└── tDCS-CAPs-dynamics.Rproj
+└── .env.example
 ```
 
 ---
