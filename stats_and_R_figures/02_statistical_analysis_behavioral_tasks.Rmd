@@ -1477,6 +1477,20 @@ if (nrow(sig_results) > 0) {
   cat("\nNo significant learning effects found.\n")
 }
 
+## Add FDR and Bonferroni corrected p-values, computed over the 90 unique
+## task+parameter combinations (the three BOB *_mean_bar_angle_rad rows are
+## duplicated and must not be double-counted in the correction)
+unique_pvals <- all_learning_results %>%
+  distinct(task, parameter, p_value) %>%
+  mutate(
+    p_fdr = p.adjust(p_value, method = "BH"),
+    p_bonf = p.adjust(p_value, method = "bonferroni")
+  ) %>%
+  select(task, parameter, p_fdr, p_bonf)
+
+all_learning_results <- all_learning_results %>%
+  left_join(unique_pvals, by = c("task", "parameter"))
+
 ## Save results
 write.csv(all_learning_results, 
           file.path(OUTPUT_DIR, "learning_effect_all_tasks.csv"), 
