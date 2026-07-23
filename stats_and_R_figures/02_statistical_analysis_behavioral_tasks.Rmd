@@ -1342,7 +1342,7 @@ analyze_learning_effect <- function(data, param_list, print_progress = TRUE) {
     
     # Get ANOVA results using lmerTest
     anova_result <- tryCatch({
-      anova(model_fit)
+      anova(lmerTest::as_lmerModLmerTest(model_fit))
     }, error = function(e) {
       if (print_progress) cat("Error in ANOVA:", e$message, "\n\n")
       return(NULL)
