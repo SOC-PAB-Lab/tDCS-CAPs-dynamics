@@ -19,7 +19,7 @@ library(tidyverse)
 library(patchwork)
 library(RColorBrewer)
 
-load_dot_env()
+load_dot_env(file = "../.env")
 
 BASE_DIR    <- Sys.getenv("BASE_DIR")
 RESULTS_DIR <- Sys.getenv("RESULTS_DIR")
@@ -147,7 +147,8 @@ create_cap4_plots <- function(k) {
   # Define conditions to compare
   comparisons <- list(
     c("Sham", "Unilateral", "Sham vs. Unilateral"),
-    c("Sham", "Bilateral", "Sham vs. Bilateral")
+    c("Sham", "Bilateral", "Sham vs. Bilateral"),
+    c("Unilateral", "Bilateral", "Unilateral vs. Bilateral")
   )
 
   # Only process CAP4
@@ -185,8 +186,8 @@ create_cap4_plots <- function(k) {
 
     plot <- create_paired_plot(df_occ, condition1, condition2, "", capX = cap_num, data_type = "occurrence")
 
-    # Remove y-axis title from the second plot (right side)
-    if (i == 2) {
+    # Remove y-axis title from all but the first plot
+    if (i >= 2) {
       plot <- plot + labs(y = "") +
         theme(axis.text.y = element_text(margin = margin(l = 10)))
     }
@@ -203,8 +204,8 @@ create_cap4_plots <- function(k) {
 
     plot <- create_paired_plot(df_dt, condition1, condition2, "", capX = cap_num, data_type = "dwelltime")
 
-    # Remove y-axis title from the second plot (right side)
-    if (i == 2) {
+    # Remove y-axis title from all but the first plot
+    if (i >= 2) {
       plot <- plot + labs(y = "") +
         theme(axis.text.y = element_text(margin = margin(l = 10)))
     }
@@ -224,7 +225,12 @@ create_cap4_plots <- function(k) {
   combined_plot_bi_filename <- file.path(plot_dir, paste0("CAP", cap_num, "_combined_bi_sham.png"))
   ggsave(combined_plot_bi_filename, combined_plot_bi, width = 3, height = 8, dpi = 400, bg = "transparent")
 
-  return(list(uni = combined_plot_uni, bi = combined_plot_bi))
+  combined_plot_uni_bi <- occ_plots[[3]] / dt_plots[[3]]
+  print(combined_plot_uni_bi)
+  combined_plot_uni_bi_filename <- file.path(plot_dir, paste0("CAP", cap_num, "_combined_uni_bi.png"))
+  ggsave(combined_plot_uni_bi_filename, combined_plot_uni_bi, width = 3, height = 8, dpi = 400, bg = "transparent")
+
+  return(list(uni = combined_plot_uni, bi = combined_plot_bi, uni_bi = combined_plot_uni_bi))
 }
 
 # Function to create and save box plots for CAP4 
