@@ -215,18 +215,18 @@ create_cap4_plots <- function(k) {
 
 
   combined_plot_uni <- occ_plots[[1]] / dt_plots[[1]]
-  print(combined_plot_uni)
+  # print(combined_plot_uni)
 
   combined_plot_uni_filename <- file.path(plot_dir, paste0("CAP", cap_num, "_combined_uni_sham.png"))
   ggsave(combined_plot_uni_filename, combined_plot_uni, width = 3, height = 8, dpi = 400, bg = "transparent")
 
   combined_plot_bi <- occ_plots[[2]] / dt_plots[[2]]
-  print(combined_plot_bi)
+  # print(combined_plot_bi)
   combined_plot_bi_filename <- file.path(plot_dir, paste0("CAP", cap_num, "_combined_bi_sham.png"))
   ggsave(combined_plot_bi_filename, combined_plot_bi, width = 3, height = 8, dpi = 400, bg = "transparent")
 
   combined_plot_uni_bi <- occ_plots[[3]] / dt_plots[[3]]
-  print(combined_plot_uni_bi)
+  # print(combined_plot_uni_bi)
   combined_plot_uni_bi_filename <- file.path(plot_dir, paste0("CAP", cap_num, "_combined_uni_bi.png"))
   ggsave(combined_plot_uni_bi_filename, combined_plot_uni_bi, width = 3, height = 8, dpi = 400, bg = "transparent")
 
@@ -305,7 +305,7 @@ create_cap4_boxplots <- function(k) {
          bp_dt,  width = 9, height = 4, dpi = 400)
 
   combined_bp <- bp_occ / bp_dt
-  print(combined_bp)
+  # print(combined_bp)
   ggsave(file.path(plot_dir, "box_plot_combined_dwell_occurrence.png"),
          combined_bp, width = 9, height = 8, dpi = 400)
 
