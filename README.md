@@ -51,7 +51,7 @@ Jupyter notebooks implementing the full CAP pipeline in Python, intended to be r
 | Notebook | Description |
 |----------|-------------|
 | `01_time_series_extraction.ipynb` | Parcellates denoised fMRI data, z-scores and concatenates time series across all subjects/sessions, saves `CAP_TS` and `DATA_LABELS`. |
-| `02_clustering_evaluation.ipynb` | Runs k-means (k=2–15, 100 permutations) and computes silhouette, Davies-Bouldin, inertia, and ARI stability to determine optimal k. |
+| `02_clustering_evaluation.ipynb` | Runs k-means (k=2–15, 100 iterations with 80% sub-sampling) and computes silhouette, Davies-Bouldin, inertia, and ARI stability to determine optimal k. |
 | `03_plot_eval_metrics.ipynb` | Plots clustering evaluation metrics from notebook 02 to guide the selection of k=7. |
 | `04_clustering_analysis.ipynb` | Runs k-means (k=2–10), reorders CAPs using the Hungarian algorithm on cosine similarity, saves cluster labels, centroids, and NIfTI spatial maps. |
 | `05_plot_caps_surf&vol.ipynb` | Plots the seven CAP spatial maps on cortical surface and subcortical axial slices. |
