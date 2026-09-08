@@ -2,9 +2,10 @@
 
 Code and processed data for the manuscript:
 
-**Bilateral M1 tDCS selectively modulates dynamic large-scale brain states associated with sensorimotor control relative to sham stimulation** <br>
-Salameh H\*, Muffel T\*, Serhan Y, Samara M, Nenning K-H, Hertz U, Villringer A, Sehm B#, Ovadia-Caro S# <br>
-(\*equal contribution, #equal correspondence)
+## **Bilateral M1 tDCS selectively modulates dynamic large-scale brain states associated with sensorimotor control relative to sham stimulation** <br>
+<br>
+Salameh H*, Muffel T*, Serhan Y, Samara M, Nenning K-H, Hertz U, Villringer A, Sehm B#, Ovadia-Caro S# <br>
+(*equal contribution, #equal correspondence)
 
 ---
 
